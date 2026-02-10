@@ -1,0 +1,91 @@
+{
+  "name": "ai-code-review",
+  "displayName": "AI Code Review Assistant",
+  "description": "AI-powered code review for PySpark, Python, Scala, SQL, and Terraform",
+  "version": "1.0.0",
+  "publisher": "ai-code-review",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Linters", "Programming Languages"],
+  "activationEvents": [
+    "onLanguage:python",
+    "onLanguage:scala",
+    "onLanguage:sql",
+    "onLanguage:terraform"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "scala",
+        "extensions": [".scala", ".sc"],
+        "aliases": ["Scala"]
+      }
+    ],
+    "commands": [
+      {
+        "command": "codereview.reviewFile",
+        "title": "Code Review: Review Current File"
+      },
+      {
+        "command": "codereview.reviewSelection",
+        "title": "Code Review: Review Selection"
+      },
+      {
+        "command": "codereview.showRefactoredCode",
+        "title": "Code Review: Show Refactored Code"
+      },
+      {
+        "command": "codereview.applyRefactoredCode",
+        "title": "Code Review: Apply Refactored Code"
+      },
+      {
+        "command": "codereview.clearDiagnostics",
+        "title": "Code Review: Clear Review Markers"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "codereview.reviewFile",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "AI Code Review",
+      "properties": {
+        "codereview.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:5001",
+          "description": "URL of the Code Review backend server"
+        },
+        "codereview.autoReviewOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically review files on save"
+        },
+        "codereview.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Anthropic API key (optional, overrides server key)"
+        },
+        "codereview.severityFilter": {
+          "type": "array",
+          "default": ["critical", "high", "medium", "low"],
+          "items": { "type": "string" },
+          "description": "Only show issues at these severity levels"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.6.0"
+  }
+}
