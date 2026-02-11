@@ -1,22 +1,22 @@
-#!/usr/bin/env npx ts-node
+//#!/usr/bin/env npx ts-node
 
-/**
- * CI/CD Code Review CLI
- * Usage: npx ts-node scripts/ci-review.ts [options] <files...>
- *
- * Examples:
- *   # Review specific files
- *   npx ts-node scripts/ci-review.ts src/main.py src/utils.py
- *
- *   # Review changed files in a PR
- *   git diff --name-only origin/main | xargs npx ts-node scripts/ci-review.ts
- *
- *   # Output SARIF for GitHub Actions
- *   npx ts-node scripts/ci-review.ts --format sarif --output report.sarif src/**/*.py
- *
- *   # Fail if critical issues found
- *   npx ts-node scripts/ci-review.ts --fail-on-critical src/**/*.py
- */
+//**
+ //* CI/CD Code Review CLI
+ //* Usage: npx ts-node scripts/ci-review.ts [options] <files...>
+ //*
+ //* Examples:
+ //*   # Review specific files
+ //*   npx ts-node scripts/ci-review.ts src/main.py src/utils.py
+ //*
+ //*   # Review changed files in a PR
+ //*   git diff --name-only origin/main | xargs npx ts-node scripts/ci-review.ts
+ //*
+ //*   # Output SARIF for GitHub Actions
+ //*   npx ts-node scripts/ci-review.ts --format sarif --output report.sarif src/**/*.py
+ //*
+ //*   # Fail if critical issues found
+ //*   npx ts-node scripts/ci-review.ts --fail-on-critical src/**/*.py
+ //*/
 
 import fs from 'fs';
 import path from 'path';
