@@ -168,9 +168,96 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const results = JSON.parse(fs.readFileSync('code-review-results.sarif'));
-            // Post results as PR comment
-            // (implementation details omitted for brevity)`}
+            let comment = '';
+
+            try {
+              const sarif = JSON.parse(fs.readFileSync('code-review-results.sarif', 'utf8'));
+              const run = sarif.runs && sarif.runs[0];
+              const results = (run && run.results) || [];
+              const props = (run && run.properties) || {};
+
+              const overallScore = props.overallScore !== undefined ? props.overallScore : 'N/A';
+              const passed = props.passThreshold !== false;
+              const scores = props.categoryScores || {};
+
+              const critical = results.filter(r => r.level === 'error' && r.properties && r.properties.severity === 'critical').length;
+              const high = results.filter(r => r.level === 'error').length - critical;
+              const medium = results.filter(r => r.level === 'warning').length;
+              const low = results.filter(r => r.level === 'note').length;
+
+              const statusEmoji = passed ? '✅' : '❌';
+              const statusText = passed ? 'Passed' : 'Failed';
+
+              const lines = [
+                '## AI Code Review Results',
+                '',
+                '**Overall Score: ' + overallScore + '/100** ' + statusEmoji + ' ' + statusText,
+                '',
+              ];
+
+              if (Object.keys(scores).length > 0) {
+                lines.push('| Category | Score |');
+                lines.push('|----------|-------|');
+                if (scores.security !== undefined) lines.push('| Security | ' + scores.security + ' |');
+                if (scores.performance !== undefined) lines.push('| Performance | ' + scores.performance + ' |');
+                if (scores.codeQuality !== undefined) lines.push('| Code Quality | ' + scores.codeQuality + ' |');
+                if (scores.maintainability !== undefined) lines.push('| Maintainability | ' + scores.maintainability + ' |');
+                lines.push('');
+              }
+
+              lines.push('**Issues Found:** ' + results.length + ' total (' + critical + ' critical, ' + high + ' high, ' + medium + ' medium, ' + low + ' low)');
+              lines.push('');
+
+              if (results.length > 0) {
+                lines.push('### Issues');
+                lines.push('| Severity | Location | Description |');
+                lines.push('|----------|----------|-------------|');
+                for (const r of results.slice(0, 10)) {
+                  const loc = r.locations && r.locations[0] && r.locations[0].physicalLocation;
+                  const file = (loc && loc.artifactLocation && loc.artifactLocation.uri) || 'unknown';
+                  const line = (loc && loc.region && loc.region.startLine) || '?';
+                  const sev = r.level === 'error' ? '🔴' : r.level === 'warning' ? '🟠' : '🟡';
+                  const msg = (r.message && r.message.text && r.message.text.substring(0, 80)) || '';
+                  lines.push('| ' + sev + ' | \`' + file + ':' + line + '\` | ' + msg + ' |');
+                }
+                if (results.length > 10) {
+                  lines.push('');
+                  lines.push('_...' + (results.length - 10) + ' more. See the Security tab for full details._');
+                }
+              }
+
+              if (!passed) {
+                lines.push('');
+                lines.push('> **Build blocked:** Code quality below required threshold. Fix the issues above before merging.');
+              }
+
+              comment = lines.join('\\n');
+            } catch (err) {
+              comment = '## AI Code Review\\n\\n> Could not parse review results: ' + err.message;
+            }
+
+            const { data: existingComments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const c of existingComments) {
+              if (c.user.type === 'Bot' && c.body.startsWith('## AI Code Review')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: c.id,
+                });
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment,
+            });`}
               </Box>
             </Paper>
 
