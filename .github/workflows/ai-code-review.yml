@@ -161,6 +161,18 @@ jobs:
           API_URL: ${{ secrets.AI_AGENT_API_URL }}
           API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
         run: |
+          # If payload file is missing or empty, no reviewable files were found
+          if [ ! -f /tmp/review_payload.json ]; then
+            echo "No payload file — no files matched supported languages. Skipping."
+            echo "gate_status=pass"        >> "$GITHUB_OUTPUT"
+            echo "status=success"          >> "$GITHUB_OUTPUT"
+            echo "total_issues=0"          >> "$GITHUB_OUTPUT"
+            echo "critical=0"              >> "$GITHUB_OUTPUT"
+            echo "high=0"                  >> "$GITHUB_OUTPUT"
+            echo "validation_failures=0"   >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           MAX_RETRIES=3
           RETRY_DELAY=10
           ATTEMPT=0
