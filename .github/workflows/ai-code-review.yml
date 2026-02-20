@@ -104,20 +104,24 @@ jobs:
             '.tf':    'terraform',
           }
 
+          # Use GITHUB_WORKSPACE for reliable absolute path resolution
+          workspace = os.environ.get('GITHUB_WORKSPACE', '')
+
           files = []
           with open('/tmp/changed_files.txt') as fh:
             paths = [line.strip() for line in fh if line.strip()]
 
           for fpath in paths:
-            if not os.path.isfile(fpath):
-              print(f"Skip (deleted/missing): {fpath}", file=sys.stderr)
+            full_path = os.path.join(workspace, fpath) if workspace else fpath
+            if not os.path.isfile(full_path):
+              print(f"Skip (deleted/missing): {fpath} (resolved: {full_path})", file=sys.stderr)
               continue
             ext = os.path.splitext(fpath)[1].lower()
             language = EXT_LANG.get(ext)
             if not language:
               continue
             try:
-              with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+              with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
               # Truncate large files to 100 KB to keep tokens manageable
               if len(content) > 102400:
@@ -156,7 +160,7 @@ jobs:
       # ── Step 5: Call AWS AI agent with exponential-backoff retry ─────────
       - name: Call AI Review Agent
         id: review
-        if: steps.diff.outputs.no_files == 'false'
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
         env:
           API_URL: ${{ secrets.AI_AGENT_API_URL }}
           API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
@@ -172,6 +176,12 @@ jobs:
             echo "validation_failures=0"   >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # Debug: show payload summary
+          FILE_COUNT=$(jq '.files | length' /tmp/review_payload.json 2>/dev/null || echo "invalid JSON")
+          PAYLOAD_SIZE=$(wc -c < /tmp/review_payload.json)
+          echo "Payload: ${FILE_COUNT} file(s), ${PAYLOAD_SIZE} bytes"
+          jq '{file_count: (.files|length), files: [.files[].path], metadata: .metadata}' /tmp/review_payload.json 2>/dev/null || echo "Failed to parse payload JSON"
 
           MAX_RETRIES=3
           RETRY_DELAY=10
@@ -242,7 +252,7 @@ jobs:
 
       # ── Step 6: Post structured PR comment ───────────────────────────────
       - name: Post PR review comment
-        if: steps.diff.outputs.no_files == 'false' && always()
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true' && always()
         uses: actions/github-script@v7
         env:
           AI_AGENT_API_URL: ${{ secrets.AI_AGENT_API_URL }}
@@ -373,7 +383,7 @@ jobs:
 
       # ── Step 7: Emit summary metrics to observability backend ─────────────
       - name: Report summary metrics
-        if: steps.diff.outputs.no_files == 'false' && always()
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true' && always()
         env:
           API_URL: ${{ secrets.AI_AGENT_API_URL }}
           API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
@@ -429,7 +439,7 @@ jobs:
 
       # ── Step 8: Emit full drill-down detail to observability backend ──────
       - name: Report drill-down detail
-        if: steps.diff.outputs.no_files == 'false' && always()
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true' && always()
         env:
           API_URL: ${{ secrets.AI_AGENT_API_URL }}
           API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
@@ -500,7 +510,7 @@ jobs:
 
       # ── Step 9: Enforce gate — fail the job if review failed ─────────────
       - name: Enforce PR gate
-        if: steps.diff.outputs.no_files == 'false'
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
         env:
           GATE_STATUS: ${{ steps.review.outputs.gate_status }}
           CRITICAL: ${{ steps.review.outputs.critical }}
