@@ -23,7 +23,11 @@ jobs:
   ai-code-review-gate:
     # Points to the reusable workflow hosted in the central AI-CodeReview-Assistant repo.
     # Replace YOUR_ORG with your GitHub organisation or username.
-    uses: YOUR_ORG/AI-CodeReview-Assistant/.github/workflows/ai-code-review.yml@main
+    uses: nikhilchatta/AI-CodeReview-Assistant/.github/workflows/ai-code-review.yml@main
+
+    permissions:
+      contents: read
+      pull-requests: write
 
     with:
       # Maximum number of changed files to send for review (default: 20)
