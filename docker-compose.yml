@@ -1,0 +1,88 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml — AI Code Review Assistant
+#
+# Usage:
+#   Local dev:    docker-compose up --build
+#   EC2 (prod):   docker-compose -f docker-compose.yml up -d --build
+#
+# Services:
+#   backend  — Express API server (port 5001, internal only)
+#   nginx    — Reverse proxy + frontend static file server (port 80, public)
+#
+# Volumes:
+#   metrics_data — Persistent SQLite database (survives container restarts)
+#   frontend_dist — Built React app served by nginx
+#
+# Before running on EC2:
+#   1. Build the frontend: cd frontend && npm ci && npm run build
+#   2. Copy dist/ to ./frontend/dist (or adjust the nginx volume path)
+#   3. Set ANTHROPIC_API_KEY in backend/.env
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+  # ── Backend: Express API ───────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-review-backend
+    restart: unless-stopped
+    env_file:
+      - backend/.env
+    environment:
+      PORT: "5001"
+      NODE_ENV: production
+      # Override SQLite path to use the persistent volume
+      METRICS_DB_PATH: /app/data/metrics.db
+    volumes:
+      # Named volume for SQLite persistence across restarts and deployments
+      - metrics_data:/app/data
+    expose:
+      # Internal only — nginx proxies /api/* to this port
+      - "5001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - internal
+
+  # ── nginx: Reverse proxy + frontend ───────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: ai-review-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # Uncomment after setting up SSL with certbot:
+      # - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # Built React frontend. Run `cd frontend && npm run build` first.
+      - ./frontend/dist:/var/www/frontend/dist:ro
+      # Certbot SSL (uncomment when ready):
+      # - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# ── Volumes ────────────────────────────────────────────────────────────────
+volumes:
+  metrics_data:
+    driver: local
+
+# ── Networks ───────────────────────────────────────────────────────────────
+networks:
+  internal:
+    driver: bridge

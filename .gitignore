@@ -1,6 +1,22 @@
-node_modules/
-dist/
-.env
+# Dependencies
+frontend/node_modules/
+backend/node_modules/
+vscode-extension/node_modules/
+
+# Build output
+frontend/dist/
+backend/dist/
+
+# Environment files
+backend/.env
 *.local
+
+# OS files
 .DS_Store
+
+# Logs
 *.log
+
+# Database
+backend/data/
+node_modules
