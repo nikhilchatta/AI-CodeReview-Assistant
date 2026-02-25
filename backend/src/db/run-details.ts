@@ -94,13 +94,16 @@ export interface RunDetail {
   latency_ms: number;
   timestamp: string;
   runtime_ms: number;
+  source?: 'ide' | 'pipeline' | 'application';
 }
 
 export interface RunDetailQuery {
   repository?: string;
   project_id?: string;
+  workflow_run_id?: string;
   status?: string;
   gate_status?: string;
+  source?: string;
   from?: string;
   to?: string;
   limit?: number;
@@ -144,9 +147,22 @@ export async function ensureRunDetailsSchema(): Promise<void> {
       model                 TEXT,
       latency_ms            INTEGER NOT NULL DEFAULT 0,
       timestamp             TEXT    NOT NULL,
-      runtime_ms            INTEGER NOT NULL DEFAULT 0
+      runtime_ms            INTEGER NOT NULL DEFAULT 0,
+      source                TEXT    NOT NULL DEFAULT 'pipeline'
     )
   `);
+
+  // Migration: add source to existing run_details tables
+  try {
+    const cols = db.exec('PRAGMA table_info(run_details)');
+    const colNames = cols[0]?.values.map((row: unknown[]) => row[1]) ?? [];
+    if (!colNames.includes('source')) {
+      db.run("ALTER TABLE run_details ADD COLUMN source TEXT NOT NULL DEFAULT 'pipeline'");
+      console.log('[RUN-DETAILS-DB] Migrated: added source column');
+    }
+  } catch {
+    // Safe to ignore
+  }
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_run_details_run_id     ON run_details(run_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_run_details_repo       ON run_details(repository)`);
@@ -185,14 +201,14 @@ export async function insertRunDetail(detail: Omit<RunDetail, 'id'>): Promise<Ru
       validation_failures, llm_findings, per_file_results, severity_distribution,
       total_issues, critical_count, high_count, medium_count, low_count,
       files_reviewed, input_tokens, output_tokens, total_tokens,
-      cost_usd, model, latency_ms, timestamp, runtime_ms
+      cost_usd, model, latency_ms, timestamp, runtime_ms, source
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
-      ?, ?, ?, ?, ?
+      ?, ?, ?, ?, ?, ?
     )`,
     [
       detail.run_id,
@@ -225,6 +241,7 @@ export async function insertRunDetail(detail: Omit<RunDetail, 'id'>): Promise<Ru
       detail.latency_ms,
       detail.timestamp || new Date().toISOString(),
       detail.runtime_ms,
+      detail.source ?? 'pipeline',
     ],
   );
 
@@ -273,9 +290,17 @@ export async function queryRunDetails(filters: RunDetailQuery): Promise<RunDetai
     conditions.push('status = ?');
     params.push(filters.status);
   }
+  if (filters.workflow_run_id) {
+    conditions.push('workflow_run_id = ?');
+    params.push(filters.workflow_run_id);
+  }
   if (filters.gate_status) {
     conditions.push('gate_status = ?');
     params.push(filters.gate_status);
+  }
+  if (filters.source) {
+    conditions.push('source = ?');
+    params.push(filters.source);
   }
   if (filters.from) {
     conditions.push('timestamp >= ?');
@@ -343,6 +368,7 @@ function deserializeRunDetail(row: Record<string, any>): RunDetail {
     latency_ms: row.latency_ms,
     timestamp: row.timestamp,
     runtime_ms: row.runtime_ms,
+    source: (row.source as 'ide' | 'pipeline' | 'application') ?? 'pipeline',
   };
 }
 

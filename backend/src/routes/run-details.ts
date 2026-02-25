@@ -85,6 +85,7 @@ export function createRunDetailsRouter(): Router {
         latency_ms:           body.latency_ms ?? 0,
         timestamp:            body.timestamp || new Date().toISOString(),
         runtime_ms:           body.runtime_ms ?? body.latency_ms ?? 0,
+        source:               body.source ?? 'pipeline',
       });
 
       console.log(`[RUN-DETAILS] Stored run ${detail.run_id} for ${detail.repository}`);
@@ -101,12 +102,14 @@ export function createRunDetailsRouter(): Router {
   router.get('/metrics/runs', async (req: Request, res: Response) => {
     try {
       const filters = {
-        repository:  req.query.repository  as string | undefined,
-        project_id:  req.query.project_id  as string | undefined,
-        status:      req.query.status      as string | undefined,
-        gate_status: req.query.gate_status as string | undefined,
-        from:        req.query.from        as string | undefined,
-        to:          req.query.to          as string | undefined,
+        repository:      req.query.repository      as string | undefined,
+        project_id:      req.query.project_id      as string | undefined,
+        workflow_run_id: req.query.workflow_run_id as string | undefined,
+        status:          req.query.status          as string | undefined,
+        gate_status:     req.query.gate_status     as string | undefined,
+        source:          req.query.source          as string | undefined,
+        from:            req.query.from            as string | undefined,
+        to:              req.query.to              as string | undefined,
         limit:  req.query.limit  ? parseInt(req.query.limit  as string, 10) : 50,
         offset: req.query.offset ? parseInt(req.query.offset as string, 10) : 0,
       };
@@ -144,6 +147,7 @@ export function createRunDetailsRouter(): Router {
         runtime_ms:           r.runtime_ms,
         validation_failure_count: r.validation_failures.length,
         llm_finding_count:        r.llm_findings.length,
+        source:                   r.source ?? 'pipeline',
       }));
 
       res.json({ data: summary, count: summary.length });

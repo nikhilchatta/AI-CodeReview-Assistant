@@ -69,6 +69,7 @@ export function createMetricsRouter(): Router {
         pr_number: body.pr_number,
         branch: body.branch,
         triggered_by: body.triggered_by,
+        source: body.source ?? 'pipeline',
       });
 
       console.log(`[METRICS] Ingested run ${metric.workflow_run_id} for ${metric.repository} (${metric.status}, $${costUsd.toFixed(6)})`);
@@ -86,6 +87,7 @@ export function createMetricsRouter(): Router {
         repository: req.query.repository as string | undefined,
         project_id: req.query.project_id as string | undefined,
         status: req.query.status as string | undefined,
+        source: req.query.source as string | undefined,
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
         limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
@@ -106,6 +108,7 @@ export function createMetricsRouter(): Router {
       const filters = {
         repository: req.query.repository as string | undefined,
         project_id: req.query.project_id as string | undefined,
+        source: req.query.source as string | undefined,
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
       };

@@ -41,6 +41,7 @@ export interface MetricsQueryParams {
   repository?: string;
   project_id?: string;
   status?: string;
+  source?: string;
   from?: string;
   to?: string;
   limit?: number;
@@ -60,7 +61,20 @@ export async function fetchMetrics(params: MetricsQueryParams = {}) {
   return response.json();
 }
 
-export async function fetchMetricsSummary(params: Pick<MetricsQueryParams, 'repository' | 'project_id' | 'from' | 'to'> = {}) {
+export async function fetchRunDetail(runId: string) {
+  const response = await fetch(`${API_BASE}/metrics/runs/${encodeURIComponent(runId)}`);
+  if (!response.ok) throw new Error(`Failed to fetch run detail: ${response.status}`);
+  return response.json();
+}
+
+export async function fetchRunDetails(params: { workflow_run_id?: string; source?: string; repository?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number } = {}) {
+  const qs = buildQueryString(params as Record<string, string | number | undefined>);
+  const response = await fetch(`${API_BASE}/metrics/runs${qs}`);
+  if (!response.ok) throw new Error(`Failed to fetch run details: ${response.status}`);
+  return response.json();
+}
+
+export async function fetchMetricsSummary(params: Pick<MetricsQueryParams, 'repository' | 'project_id' | 'source' | 'from' | 'to'> = {}) {
   const qs = buildQueryString(params as Record<string, string | number | undefined>);
   const response = await fetch(`${API_BASE}/metrics/summary${qs}`);
   if (!response.ok) throw new Error(`Failed to fetch metrics summary: ${response.status}`);

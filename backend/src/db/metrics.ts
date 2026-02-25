@@ -45,12 +45,14 @@ export interface MetricRecord {
   pr_number?: number;
   branch?: string;
   triggered_by?: string;
+  source?: 'ide' | 'pipeline' | 'application';
 }
 
 export interface MetricQueryFilters {
   repository?: string;
   project_id?: string;
   status?: string;
+  source?: string;
   from?: string;
   to?: string;
   limit?: number;
@@ -130,7 +132,8 @@ function initSchema(database: Database): void {
       cost_usd        REAL    NOT NULL DEFAULT 0,
       pr_number       INTEGER,
       branch          TEXT,
-      triggered_by    TEXT
+      triggered_by    TEXT,
+      source          TEXT    NOT NULL DEFAULT 'pipeline'
     )
   `);
   database.run(`CREATE INDEX IF NOT EXISTS idx_metrics_repo       ON workflow_metrics(repository)`);
@@ -138,16 +141,20 @@ function initSchema(database: Database): void {
   database.run(`CREATE INDEX IF NOT EXISTS idx_metrics_timestamp  ON workflow_metrics(timestamp)`);
   database.run(`CREATE INDEX IF NOT EXISTS idx_metrics_status     ON workflow_metrics(status)`);
 
-  // Migration: add cost_usd column to existing databases
+  // Migrations for existing databases
   try {
     const cols = database.exec('PRAGMA table_info(workflow_metrics)');
-    const hasColumn = cols[0]?.values.some((row: unknown[]) => row[1] === 'cost_usd');
-    if (!hasColumn) {
+    const colNames = cols[0]?.values.map((row: unknown[]) => row[1]) ?? [];
+    if (!colNames.includes('cost_usd')) {
       database.run('ALTER TABLE workflow_metrics ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0');
       console.log('[METRICS-DB] Migrated: added cost_usd column');
     }
+    if (!colNames.includes('source')) {
+      database.run("ALTER TABLE workflow_metrics ADD COLUMN source TEXT NOT NULL DEFAULT 'pipeline'");
+      console.log('[METRICS-DB] Migrated: added source column');
+    }
   } catch {
-    // Column already exists or table doesn't exist yet — safe to ignore
+    // Safe to ignore — columns already exist
   }
 }
 
@@ -197,8 +204,8 @@ export async function insertMetric(metric: Omit<MetricRecord, 'id'>): Promise<Me
       repository, project_id, workflow_run_id, timestamp,
       api_token_hash, request_count, input_tokens, output_tokens, total_tokens,
       latency_ms, status, error_message, files_reviewed, issues_found,
-      critical_count, high_count, model, cost_usd, pr_number, branch, triggered_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      critical_count, high_count, model, cost_usd, pr_number, branch, triggered_by, source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       metric.repository,
       metric.project_id,
@@ -221,6 +228,7 @@ export async function insertMetric(metric: Omit<MetricRecord, 'id'>): Promise<Me
       metric.pr_number ?? null,
       metric.branch ?? null,
       metric.triggered_by ?? null,
+      metric.source ?? 'pipeline',
     ],
   );
 
@@ -252,6 +260,10 @@ export async function queryMetrics(filters: MetricQueryFilters): Promise<MetricR
     conditions.push('status = ?');
     params.push(filters.status);
   }
+  if (filters.source) {
+    conditions.push('source = ?');
+    params.push(filters.source);
+  }
   if (filters.from) {
     conditions.push('timestamp >= ?');
     params.push(filters.from);
@@ -278,7 +290,7 @@ export async function queryMetrics(filters: MetricQueryFilters): Promise<MetricR
 }
 
 export async function getMetricsSummary(
-  filters: Pick<MetricQueryFilters, 'repository' | 'project_id' | 'from' | 'to'>,
+  filters: Pick<MetricQueryFilters, 'repository' | 'project_id' | 'source' | 'from' | 'to'>,
 ): Promise<MetricSummary> {
   const database = await getDatabase();
   const conditions: string[] = [];
@@ -291,6 +303,10 @@ export async function getMetricsSummary(
   if (filters.project_id) {
     conditions.push('project_id = ?');
     params.push(filters.project_id);
+  }
+  if (filters.source) {
+    conditions.push('source = ?');
+    params.push(filters.source);
   }
   if (filters.from) {
     conditions.push('timestamp >= ?');

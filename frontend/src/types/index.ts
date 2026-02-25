@@ -102,6 +102,7 @@ export interface WorkflowMetric {
   pr_number?: number;
   branch?: string;
   triggered_by?: string;
+  source?: 'ide' | 'pipeline' | 'application';
 }
 
 export interface MetricsSummary {
