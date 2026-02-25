@@ -79,9 +79,19 @@ interface LLMFinding {
   codeSnippet?: string;
 }
 
+interface PerFileIssue {
+  severity?: string;
+  category?: string;
+  message: string;
+  suggestion?: string;
+  line_number?: number;
+}
+
 interface PerFileResult {
   file: string;
-  issues?: number;
+  issues?: PerFileIssue[] | number;
+  validation_count?: number;
+  llm_count?: number;
   status?: string;
   language?: string;
 }
@@ -350,7 +360,7 @@ function DrillDownDrawer({
                   ['Repository', detail.repository],
                   ['Branch', detail.branch || '-'],
                   ['PR', detail.pr_number ? `#${detail.pr_number}` : '-'],
-                  ['Actor', detail.actor || '-'],
+                  ['User / Actor', detail.actor || '-'],
                   ['Commit', detail.commit_sha ? detail.commit_sha.slice(0, 8) : '-'],
                   ['Model', detail.model || '-'],
                   ['Files Reviewed', String(detail.files_reviewed)],
@@ -558,34 +568,80 @@ function DrillDownDrawer({
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
                   <ArticleIcon sx={{ color: '#10B981', fontSize: 20 }} />
                   <Typography variant="subtitle2" fontWeight={700}>
-                    Affected Files
+                    Issues by File
                   </Typography>
                 </Box>
-                <Stack spacing={0.5}>
-                  {detail.per_file_results.map((pf, i) => (
-                    <Paper
-                      key={i}
-                      elevation={0}
-                      sx={{ px: 2, py: 1, border: 1, borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
-                    >
-                      <Typography variant="body2" sx={{ fontFamily: 'monospace', flex: 1, mr: 1 }} noWrap>
-                        {pf.file}
-                      </Typography>
-                      <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center', flexShrink: 0 }}>
-                        {pf.language && (
-                          <Chip label={pf.language} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                <Stack spacing={1}>
+                  {detail.per_file_results.map((pf, i) => {
+                    const issueList: PerFileIssue[] = Array.isArray(pf.issues) ? pf.issues : [];
+                    const issueCount = issueList.length || (typeof pf.issues === 'number' ? pf.issues : 0);
+                    return (
+                      <Accordion key={i} elevation={0} defaultExpanded={issueList.length > 0} sx={{ border: 1, borderColor: 'divider', '&:before': { display: 'none' } }}>
+                        <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ py: 0.5 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1, minWidth: 0 }}>
+                            <ArticleIcon sx={{ fontSize: 16, color: 'text.secondary', flexShrink: 0 }} />
+                            <Typography variant="body2" sx={{ fontFamily: 'monospace', flex: 1, mr: 1 }} noWrap>
+                              {pf.file}
+                            </Typography>
+                            <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center', flexShrink: 0 }}>
+                              {pf.language && (
+                                <Chip label={pf.language} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                              )}
+                              <Chip
+                                label={`${issueCount} issue${issueCount !== 1 ? 's' : ''}`}
+                                size="small"
+                                color={issueCount > 0 ? 'warning' : 'success'}
+                                sx={{ height: 18, fontSize: '0.65rem' }}
+                              />
+                              {pf.validation_count != null && (
+                                <Chip label={`${pf.validation_count} rule`} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                              )}
+                              {pf.llm_count != null && (
+                                <Chip label={`${pf.llm_count} AI`} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem', color: '#6366F1', borderColor: '#6366F1' }} />
+                              )}
+                            </Box>
+                          </Box>
+                        </AccordionSummary>
+                        {issueList.length > 0 && (
+                          <AccordionDetails sx={{ pt: 0, px: 1.5, pb: 1.5 }}>
+                            <Stack spacing={0.75}>
+                              {issueList.map((issue, j) => (
+                                <Paper
+                                  key={j}
+                                  elevation={0}
+                                  sx={{
+                                    p: 1.5,
+                                    border: 1,
+                                    borderColor: 'divider',
+                                    borderLeft: 3,
+                                    borderLeftColor: SEVERITY_COLORS[(issue.severity || 'info').toLowerCase()] || '#6B7280',
+                                  }}
+                                >
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                                    <SeverityChip severity={issue.severity} />
+                                    {issue.category && (
+                                      <Chip label={issue.category} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.65rem' }} />
+                                    )}
+                                    {issue.line_number != null && (
+                                      <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+                                        line {issue.line_number}
+                                      </Typography>
+                                    )}
+                                  </Box>
+                                  <Typography variant="body2">{issue.message}</Typography>
+                                  {issue.suggestion && (
+                                    <Typography variant="caption" color="primary" sx={{ display: 'block', mt: 0.5 }}>
+                                      Suggestion: {issue.suggestion}
+                                    </Typography>
+                                  )}
+                                </Paper>
+                              ))}
+                            </Stack>
+                          </AccordionDetails>
                         )}
-                        {pf.issues != null && (
-                          <Chip
-                            label={`${pf.issues} issue${pf.issues !== 1 ? 's' : ''}`}
-                            size="small"
-                            color={pf.issues > 0 ? 'warning' : 'success'}
-                            sx={{ height: 18, fontSize: '0.65rem' }}
-                          />
-                        )}
-                      </Box>
-                    </Paper>
-                  ))}
+                      </Accordion>
+                    );
+                  })}
                 </Stack>
               </Box>
             )}
@@ -789,6 +845,7 @@ function SourceDashboard({ source, active }: SourceDashboardProps) {
                 <TableCell sx={{ fontWeight: 700 }}>Repository</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Branch</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>PR</TableCell>
+                <TableCell sx={{ fontWeight: 700 }}>User</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Run ID</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Gate</TableCell>
@@ -803,7 +860,7 @@ function SourceDashboard({ source, active }: SourceDashboardProps) {
             <TableBody>
               {runs.length === 0 && !loading ? (
                 <TableRow>
-                  <TableCell colSpan={13} align="center" sx={{ py: 6 }}>
+                  <TableCell colSpan={14} align="center" sx={{ py: 6 }}>
                     <BugReportIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1, display: 'block', mx: 'auto' }} />
                     <Typography color="text.secondary">
                       No runs recorded for this source yet.
@@ -836,10 +893,25 @@ function SourceDashboard({ source, active }: SourceDashboardProps) {
                       </Typography>
                     </TableCell>
                     <TableCell>
-                      <Tooltip title={m.workflow_run_id}>
-                        <Typography variant="body2" fontSize="0.8rem" sx={{ fontFamily: 'monospace' }}>
+                      <Typography variant="body2" fontSize="0.8rem">
+                        {m.actor || '-'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Tooltip title="Click to open drill-down">
+                        <Typography
+                          variant="body2"
+                          fontSize="0.8rem"
+                          sx={{
+                            fontFamily: 'monospace',
+                            color: 'primary.main',
+                            textDecoration: 'underline',
+                            cursor: 'pointer',
+                          }}
+                          onClick={(e) => { e.stopPropagation(); openDrillDown(m.run_id); }}
+                        >
                           {m.workflow_run_id.length > 12
-                            ? `${m.workflow_run_id.slice(0, 12)}...`
+                            ? `${m.workflow_run_id.slice(0, 12)}…`
                             : m.workflow_run_id}
                         </Typography>
                       </Tooltip>

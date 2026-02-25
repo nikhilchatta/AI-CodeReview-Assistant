@@ -88,8 +88,9 @@ export function createAIAnalyzeRouter(): Router {
     const startTime = Date.now();
 
     try {
-      const { code, language, prompt, source } = req.body;
+      const { code, language, prompt, source, userId } = req.body;
       const requestSource: 'ide' | 'application' = source === 'application' ? 'application' : 'ide';
+      const actor: string = (userId || '').trim() || (requestSource === 'application' ? 'webapp-user' : 'terminal-user');
 
       if (!code) return res.status(400).json({ error: 'code is required' });
       if (!language) return res.status(400).json({ error: 'language is required' });
@@ -177,6 +178,42 @@ export function createAIAnalyzeRouter(): Router {
       const lowCount    = mergedIssues.filter((i: any) => i.severity === 'low').length;
       const infoCount   = mergedIssues.filter((i: any) => i.severity === 'info').length;
 
+      const inlineFile = `inline.${language}`;
+
+      const validationFailures = patternIssues.map((i: any) => ({
+        severity:    i.severity   ?? 'info',
+        category:    i.category   ?? 'best-practice',
+        message:     i.message    ?? '',
+        suggestion:  i.suggestion ?? '',
+        file:        inlineFile,
+        rule_id:     i.ruleId     ?? undefined,
+        line_number: i.lineNumber ?? undefined,
+      }));
+
+      const llmFindings = aiResult.issues.map((i: any) => ({
+        severity:    i.severity   ?? 'info',
+        category:    i.category   ?? 'best-practice',
+        message:     i.message    ?? '',
+        suggestion:  i.suggestion ?? '',
+        file:        inlineFile,
+        reasoning:   i.reasoning  ?? undefined,
+        line_number: i.lineNumber ?? undefined,
+      }));
+
+      const perFileResults = [{
+        file:             inlineFile,
+        language,
+        validation_count: patternIssues.length,
+        llm_count:        aiResult.issues.length,
+        issues:           mergedIssues.map((i: any) => ({
+          severity:    i.severity   ?? 'info',
+          category:    i.category   ?? 'best-practice',
+          message:     i.message    ?? '',
+          suggestion:  i.suggestion ?? undefined,
+          line_number: i.lineNumber ?? undefined,
+        })),
+      }];
+
       Promise.all([
         insertMetric({
           repository,
@@ -202,6 +239,7 @@ export function createAIAnalyzeRouter(): Router {
           repository,
           workflow_run_id:     workflowRunId,
           project_id:          projectId,
+          actor,
           status:              'success',
           gate_status:         criticalCount > 0 ? 'fail' : 'pass',
           source:              requestSource,
@@ -212,9 +250,9 @@ export function createAIAnalyzeRouter(): Router {
           medium_count:        mediumCount,
           low_count:           lowCount,
           severity_distribution: { critical: criticalCount, high: highCount, medium: mediumCount, low: lowCount, info: infoCount },
-          validation_failures: [],
-          llm_findings:        [],
-          per_file_results:    [],
+          validation_failures: validationFailures,
+          llm_findings:        llmFindings,
+          per_file_results:    perFileResults,
           input_tokens:        inputTokens,
           output_tokens:       outputTokens,
           total_tokens:        inputTokens + outputTokens,

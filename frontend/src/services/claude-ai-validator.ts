@@ -71,10 +71,12 @@ async function callClaudeAPI(
       }
     }
 
+    const userId = localStorage.getItem('userId')?.trim() || 'webapp-user';
+
     const response = await fetch('/api/analyze-code', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ code, language: pipelineType, prompt, source: 'application' }),
+      body: JSON.stringify({ code, language: pipelineType, prompt, source: 'application', userId }),
     });
 
     if (!response.ok) {

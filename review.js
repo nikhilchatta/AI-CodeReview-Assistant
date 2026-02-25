@@ -59,10 +59,13 @@ function severityBadge(s) {
 const args = process.argv.slice(2);
 let filePath = null;
 let apiUrl   = process.env.CODE_REVIEW_API_URL || '';
+let userId   = process.env.USER || process.env.USERNAME || 'terminal-user';
 
 for (let i = 0; i < args.length; i++) {
   if ((args[i] === '--api-url' || args[i] === '-u') && args[i + 1]) {
     apiUrl = args[++i];
+  } else if ((args[i] === '--user' || args[i] === '--username') && args[i + 1]) {
+    userId = args[++i];
   } else if (!args[i].startsWith('-')) {
     filePath = args[i];
   }
@@ -107,7 +110,7 @@ try {
   const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/analyze-code`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ code, language, source: 'ide' }),
+    body:    JSON.stringify({ code, language, source: 'ide', userId }),
   });
 
   if (!res.ok) {
