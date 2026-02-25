@@ -1,7 +1,11 @@
 import { Router } from 'express';
+import { randomUUID } from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { getAIPlatformConfig, callAIPlatform } from './ai-platform.js';
 import { runPatternRules, mergeIssues } from '../engine/pattern-rules.js';
+import { insertMetric } from '../db/metrics.js';
+import { insertRunDetail } from '../db/run-details.js';
+import { calculateCost } from '../db/pricing.js';
 
 interface AIAnalysisResponse {
   issues: any[];
@@ -81,9 +85,11 @@ export function createAIAnalyzeRouter(): Router {
 
   router.post('/analyze-code', async (req, res) => {
     console.log('[AI-ANALYZE] Received analyze-code request');
+    const startTime = Date.now();
 
     try {
-      const { code, language, prompt } = req.body;
+      const { code, language, prompt, source } = req.body;
+      const requestSource: 'ide' | 'application' = source === 'application' ? 'application' : 'ide';
 
       if (!code) return res.status(400).json({ error: 'code is required' });
       if (!language) return res.status(400).json({ error: 'language is required' });
@@ -152,6 +158,103 @@ export function createAIAnalyzeRouter(): Router {
       // ── Step 3: Merge & deduplicate ──
       const mergedIssues = mergeIssues(patternIssues, aiResult.issues);
       console.log(`[AI-ANALYZE] Analysis completed: ${aiResult.issues.length} AI + ${patternIssues.length} pattern → ${mergedIssues.length} merged issues`);
+
+      // ── Step 4: Record metrics for observability dashboard ──
+      const latencyMs = Date.now() - startTime;
+      const inputTokens  = tokenUsage?.inputTokens  ?? 0;
+      const outputTokens = tokenUsage?.outputTokens ?? 0;
+      const model        = tokenUsage?.model;
+      const runId        = randomUUID();
+      const repository   = (req.headers['x-repository'] as string) || `ide-review/${language}`;
+      const projectId    = (req.headers['x-project-id'] as string) || 'ide';
+      const workflowRunId = runId;
+      const criticalCount = mergedIssues.filter((i: any) => i.severity === 'critical').length;
+      const highCount     = mergedIssues.filter((i: any) => i.severity === 'high').length;
+      const costUsd       = calculateCost(model, inputTokens, outputTokens);
+
+      // Fire-and-forget — don't block the response on DB writes
+      Promise.all([
+        insertMetric({
+          repository,
+          project_id:      projectId,
+          workflow_run_id: workflowRunId,
+          timestamp:       new Date().toISOString(),
+          request_count:   1,
+          input_tokens:    inputTokens,
+          output_tokens:   outputTokens,
+          total_tokens:    inputTokens + outputTokens,
+          latency_ms:      latencyMs,
+          status:          'success',
+          files_reviewed:  1,
+          issues_found:    mergedIssues.length,
+          critical_count:  criticalCount,
+          high_count:      highCount,
+          model,
+          cost_usd:        costUsd,
+          source:          requestSource,
+        }),
+        insertRunDetail({
+          run_id:               runId,
+          repository,
+          workflow_run_id:      workflowRunId,
+          project_id:           projectId,
+          status:               'success',
+          gate_status:          criticalCount > 0 ? 'fail' : 'pass',
+          source:               requestSource,
+          files_reviewed:       1,
+          total_issues:         mergedIssues.length,
+          critical_count:       criticalCount,
+          high_count:           highCount,
+          medium_count:         mergedIssues.filter((i: any) => i.severity === 'medium').length,
+          low_count:            mergedIssues.filter((i: any) => i.severity === 'low').length,
+          severity_distribution: {
+            critical: criticalCount,
+            high:     highCount,
+            medium:   mergedIssues.filter((i: any) => i.severity === 'medium').length,
+            low:      mergedIssues.filter((i: any) => i.severity === 'low').length,
+            info:     mergedIssues.filter((i: any) => i.severity === 'info').length,
+          },
+          validation_failures: patternIssues.map((i: any) => ({
+            rule_id:    i.ruleId,
+            message:    i.message,
+            severity:   i.severity   ?? 'info',
+            category:   i.category   ?? 'best-practice',
+            suggestion: i.suggestion ?? '',
+            file:       `inline.${language}`,
+            line_number: i.lineNumber,
+          })),
+          llm_findings: aiResult.issues.map((i: any) => ({
+            severity:    i.severity  ?? 'info',
+            category:    i.category  ?? 'best-practice',
+            message:     i.message,
+            line_number: i.lineNumber,
+            suggestion:  i.suggestion ?? '',
+            reasoning:   i.reasoning,
+            file:        `inline.${language}`,
+          })),
+          per_file_results: [{
+            file:             `inline.${language}`,
+            language,
+            validation_count: patternIssues.length,
+            llm_count:        aiResult.issues.length,
+            issues:           mergedIssues.map((i: any) => ({
+              severity:   i.severity  ?? 'info',
+              category:   i.category  ?? 'best-practice',
+              message:    i.message,
+              suggestion: i.suggestion,
+              line_number: i.lineNumber,
+            })),
+          }],
+          input_tokens:    inputTokens,
+          output_tokens:   outputTokens,
+          total_tokens:    inputTokens + outputTokens,
+          cost_usd:        costUsd,
+          model,
+          latency_ms:      latencyMs,
+          runtime_ms:      latencyMs,
+          timestamp:       new Date().toISOString(),
+        }),
+      ]).catch(err => console.error('[AI-ANALYZE] Metrics recording failed:', err.message));
 
       res.json({
         issues: mergedIssues,
