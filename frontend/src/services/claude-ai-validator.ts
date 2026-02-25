@@ -74,7 +74,7 @@ async function callClaudeAPI(
     const response = await fetch('/api/analyze-code', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ code, language: pipelineType, prompt }),
+      body: JSON.stringify({ code, language: pipelineType, prompt, source: 'application' }),
     });
 
     if (!response.ok) {

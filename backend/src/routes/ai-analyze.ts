@@ -172,7 +172,11 @@ export function createAIAnalyzeRouter(): Router {
       const highCount     = mergedIssues.filter((i: any) => i.severity === 'high').length;
       const costUsd       = calculateCost(model, inputTokens, outputTokens);
 
-      // Fire-and-forget — don't block the response on DB writes
+      // Fire-and-forget — record only the fields the dashboard needs; don't block the response
+      const mediumCount = mergedIssues.filter((i: any) => i.severity === 'medium').length;
+      const lowCount    = mergedIssues.filter((i: any) => i.severity === 'low').length;
+      const infoCount   = mergedIssues.filter((i: any) => i.severity === 'info').length;
+
       Promise.all([
         insertMetric({
           repository,
@@ -194,65 +198,31 @@ export function createAIAnalyzeRouter(): Router {
           source:          requestSource,
         }),
         insertRunDetail({
-          run_id:               runId,
+          run_id:              runId,
           repository,
-          workflow_run_id:      workflowRunId,
-          project_id:           projectId,
-          status:               'success',
-          gate_status:          criticalCount > 0 ? 'fail' : 'pass',
-          source:               requestSource,
-          files_reviewed:       1,
-          total_issues:         mergedIssues.length,
-          critical_count:       criticalCount,
-          high_count:           highCount,
-          medium_count:         mergedIssues.filter((i: any) => i.severity === 'medium').length,
-          low_count:            mergedIssues.filter((i: any) => i.severity === 'low').length,
-          severity_distribution: {
-            critical: criticalCount,
-            high:     highCount,
-            medium:   mergedIssues.filter((i: any) => i.severity === 'medium').length,
-            low:      mergedIssues.filter((i: any) => i.severity === 'low').length,
-            info:     mergedIssues.filter((i: any) => i.severity === 'info').length,
-          },
-          validation_failures: patternIssues.map((i: any) => ({
-            rule_id:    i.ruleId,
-            message:    i.message,
-            severity:   i.severity   ?? 'info',
-            category:   i.category   ?? 'best-practice',
-            suggestion: i.suggestion ?? '',
-            file:       `inline.${language}`,
-            line_number: i.lineNumber,
-          })),
-          llm_findings: aiResult.issues.map((i: any) => ({
-            severity:    i.severity  ?? 'info',
-            category:    i.category  ?? 'best-practice',
-            message:     i.message,
-            line_number: i.lineNumber,
-            suggestion:  i.suggestion ?? '',
-            reasoning:   i.reasoning,
-            file:        `inline.${language}`,
-          })),
-          per_file_results: [{
-            file:             `inline.${language}`,
-            language,
-            validation_count: patternIssues.length,
-            llm_count:        aiResult.issues.length,
-            issues:           mergedIssues.map((i: any) => ({
-              severity:   i.severity  ?? 'info',
-              category:   i.category  ?? 'best-practice',
-              message:    i.message,
-              suggestion: i.suggestion,
-              line_number: i.lineNumber,
-            })),
-          }],
-          input_tokens:    inputTokens,
-          output_tokens:   outputTokens,
-          total_tokens:    inputTokens + outputTokens,
-          cost_usd:        costUsd,
+          workflow_run_id:     workflowRunId,
+          project_id:          projectId,
+          status:              'success',
+          gate_status:         criticalCount > 0 ? 'fail' : 'pass',
+          source:              requestSource,
+          files_reviewed:      1,
+          total_issues:        mergedIssues.length,
+          critical_count:      criticalCount,
+          high_count:          highCount,
+          medium_count:        mediumCount,
+          low_count:           lowCount,
+          severity_distribution: { critical: criticalCount, high: highCount, medium: mediumCount, low: lowCount, info: infoCount },
+          validation_failures: [],
+          llm_findings:        [],
+          per_file_results:    [],
+          input_tokens:        inputTokens,
+          output_tokens:       outputTokens,
+          total_tokens:        inputTokens + outputTokens,
+          cost_usd:            costUsd,
           model,
-          latency_ms:      latencyMs,
-          runtime_ms:      latencyMs,
-          timestamp:       new Date().toISOString(),
+          latency_ms:          latencyMs,
+          runtime_ms:          latencyMs,
+          timestamp:           new Date().toISOString(),
         }),
       ]).catch(err => console.error('[AI-ANALYZE] Metrics recording failed:', err.message));
 
