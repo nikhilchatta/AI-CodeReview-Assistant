@@ -383,7 +383,7 @@ function DrillDownDrawer({
               <Divider sx={{ my: 1.5 }} />
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
                 <StatusChip status={detail.status} />
-                <GateChip gate={detail.gate_status} />
+                {detail.source === 'pipeline' && <GateChip gate={detail.gate_status} />}
                 {detail.source && (
                   <Chip
                     label={sourceLabel[detail.source] || detail.source}
@@ -848,7 +848,7 @@ function SourceDashboard({ source, active }: SourceDashboardProps) {
                 <TableCell sx={{ fontWeight: 700 }}>User</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Run ID</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Gate</TableCell>
+                {source === 'pipeline' && <TableCell sx={{ fontWeight: 700 }}>Gate</TableCell>}
                 <TableCell sx={{ fontWeight: 700 }}>Files</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Issues</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Tokens</TableCell>
@@ -860,7 +860,7 @@ function SourceDashboard({ source, active }: SourceDashboardProps) {
             <TableBody>
               {runs.length === 0 && !loading ? (
                 <TableRow>
-                  <TableCell colSpan={14} align="center" sx={{ py: 6 }}>
+                  <TableCell colSpan={source === 'pipeline' ? 14 : 13} align="center" sx={{ py: 6 }}>
                     <BugReportIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1, display: 'block', mx: 'auto' }} />
                     <Typography color="text.secondary">
                       No runs recorded for this source yet.
@@ -919,9 +919,11 @@ function SourceDashboard({ source, active }: SourceDashboardProps) {
                     <TableCell>
                       <StatusChip status={m.status} />
                     </TableCell>
-                    <TableCell>
-                      <GateChip gate={m.gate_status} />
-                    </TableCell>
+                    {source === 'pipeline' && (
+                      <TableCell>
+                        <GateChip gate={m.gate_status} />
+                      </TableCell>
+                    )}
                     <TableCell align="center">{m.files_reviewed}</TableCell>
                     <TableCell>
                       <Tooltip title="Click to view full drill-down">
