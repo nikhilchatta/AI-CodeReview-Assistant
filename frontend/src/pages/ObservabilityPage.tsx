@@ -358,10 +358,12 @@ function DrillDownDrawer({
               >
                 {[
                   ['Repository', detail.repository],
-                  ['Branch', detail.branch || '-'],
-                  ['PR', detail.pr_number ? `#${detail.pr_number}` : '-'],
+                  ...(detail.source === 'pipeline' ? [
+                    ['Branch', detail.branch || '-'],
+                    ['PR', detail.pr_number ? `#${detail.pr_number}` : '-'],
+                    ['Commit', detail.commit_sha ? detail.commit_sha.slice(0, 8) : '-'],
+                  ] : []),
                   ['User / Actor', detail.actor || '-'],
-                  ['Commit', detail.commit_sha ? detail.commit_sha.slice(0, 8) : '-'],
                   ['Model', detail.model || '-'],
                   ['Files Reviewed', String(detail.files_reviewed)],
                   ['Latency', detail.latency_ms > 0 ? `${(detail.latency_ms / 1000).toFixed(1)}s` : '-'],
@@ -843,8 +845,8 @@ function SourceDashboard({ source, active }: SourceDashboardProps) {
               <TableRow>
                 <TableCell sx={{ fontWeight: 700 }}>Timestamp</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Repository</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Branch</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>PR</TableCell>
+                {source === 'pipeline' && <TableCell sx={{ fontWeight: 700 }}>Branch</TableCell>}
+                {source === 'pipeline' && <TableCell sx={{ fontWeight: 700 }}>PR</TableCell>}
                 <TableCell sx={{ fontWeight: 700 }}>User</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Run ID</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
@@ -860,7 +862,7 @@ function SourceDashboard({ source, active }: SourceDashboardProps) {
             <TableBody>
               {runs.length === 0 && !loading ? (
                 <TableRow>
-                  <TableCell colSpan={source === 'pipeline' ? 14 : 13} align="center" sx={{ py: 6 }}>
+                  <TableCell colSpan={source === 'pipeline' ? 14 : 11} align="center" sx={{ py: 6 }}>
                     <BugReportIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1, display: 'block', mx: 'auto' }} />
                     <Typography color="text.secondary">
                       No runs recorded for this source yet.
@@ -882,16 +884,20 @@ function SourceDashboard({ source, active }: SourceDashboardProps) {
                         {m.repository}
                       </Typography>
                     </TableCell>
-                    <TableCell>
-                      <Typography variant="body2" fontSize="0.8rem">
-                        {m.branch || '-'}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Typography variant="body2" fontSize="0.8rem">
-                        {m.pr_number ? `#${m.pr_number}` : '-'}
-                      </Typography>
-                    </TableCell>
+                    {source === 'pipeline' && (
+                      <TableCell>
+                        <Typography variant="body2" fontSize="0.8rem">
+                          {m.branch || '-'}
+                        </Typography>
+                      </TableCell>
+                    )}
+                    {source === 'pipeline' && (
+                      <TableCell>
+                        <Typography variant="body2" fontSize="0.8rem">
+                          {m.pr_number ? `#${m.pr_number}` : '-'}
+                        </Typography>
+                      </TableCell>
+                    )}
                     <TableCell>
                       <Typography variant="body2" fontSize="0.8rem">
                         {m.actor || '-'}
