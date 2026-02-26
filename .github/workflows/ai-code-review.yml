@@ -172,7 +172,9 @@ jobs:
           with open('/tmp/review_payload.json', 'w') as f:
             json.dump(payload, f)
 
-          print(f"Payload ready: {len(files)} file(s)", file=sys.stderr)
+          import os as _os
+          _size = _os.path.getsize('/tmp/review_payload.json')
+          print(f"Payload ready: {len(files)} file(s), {_size} bytes written to /tmp/review_payload.json", file=sys.stderr)
           PYEOF
 
       # ── Validate secrets ─────────────────────────────────────────────────
@@ -200,6 +202,9 @@ jobs:
           fi
 
           jq '. + {"analysis_type": "complexity"}' /tmp/review_payload.json > /tmp/payload_complexity.json
+          echo "DEBUG payload size: $(wc -c < /tmp/payload_complexity.json) bytes"
+          echo "DEBUG files count: $(jq '.files | length' /tmp/payload_complexity.json 2>&1)"
+          echo "DEBUG first file: $(jq -r '.files[0].path // "none"' /tmp/payload_complexity.json 2>&1)"
           MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
 
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
