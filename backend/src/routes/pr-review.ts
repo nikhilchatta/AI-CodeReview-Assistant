@@ -45,9 +45,12 @@ interface ReviewMetadata {
   project_id?: string;
 }
 
+type AnalysisType = 'complexity' | 'security' | 'review' | 'quality';
+
 interface PRReviewRequest {
   files: ReviewFile[];
   metadata: ReviewMetadata;
+  analysis_type?: AnalysisType;
 }
 
 interface PRReviewResponse {
@@ -122,12 +125,14 @@ export function createPRReviewRouter(): Router {
         return res.status(400).json({ error: 'metadata.workflow_run_id is required' });
       }
 
-      const { files, metadata } = body;
-      const runId = `${metadata.workflow_run_id}-${Date.now()}`;
+      const { files, metadata, analysis_type } = body;
+      const analysisType: AnalysisType = analysis_type ?? 'review';
+      const runId = `${metadata.workflow_run_id}-${analysisType}-${Date.now()}`;
 
       console.log(
         `[PR-REVIEW] Run ${runId}: ${files.length} file(s) for ${metadata.repository} ` +
-        `PR#${metadata.pr_number ?? 'n/a'} branch=${metadata.branch ?? 'n/a'}`,
+        `PR#${metadata.pr_number ?? 'n/a'} branch=${metadata.branch ?? 'n/a'} ` +
+        `analysis_type=${analysisType}`,
       );
 
       // ── Resolve AI client ──
@@ -164,7 +169,7 @@ export function createPRReviewRouter(): Router {
           if (aiProvider === 'ai-platform') {
             const platformConfig = getAIPlatformConfig(req);
             if (platformConfig) {
-              const prompt = buildReviewPrompt(file.content, file.language, file.path);
+              const prompt = buildReviewPrompt(file.content, file.language, file.path, analysisType);
               const result = await callAIPlatform(
                 platformConfig,
                 aiModel || 'gpt-4',
@@ -176,7 +181,7 @@ export function createPRReviewRouter(): Router {
               tokenUsage = result.usage;
             }
           } else if (claude) {
-            const prompt = buildReviewPrompt(file.content, file.language, file.path);
+            const prompt = buildReviewPrompt(file.content, file.language, file.path, analysisType);
             const response = await claude.messages.create({
               model: 'claude-sonnet-4-20250514',
               max_tokens: 8192,
@@ -337,34 +342,72 @@ export function createPRReviewRouter(): Router {
   return router;
 }
 
-// ── Prompt builder ─────────────────────────────────────────────────────────
+// ── Prompt builders ─────────────────────────────────────────────────────────
 
-function buildReviewPrompt(code: string, language: string, filePath: string): string {
+function buildReviewPrompt(
+  code: string,
+  language: string,
+  filePath: string,
+  analysisType: AnalysisType = 'review',
+): string {
   const languageContext: Record<string, string> = {
-    pyspark:    'PySpark code reviewer specializing in big data engineering, Spark optimization, and distributed processing',
-    python:     'Python code reviewer specializing in clean code, performance, security, and best practices',
-    typescript: 'TypeScript code reviewer specializing in type safety, async patterns, and Node.js best practices',
-    javascript: 'JavaScript code reviewer specializing in modern ES6+, async patterns, and web best practices',
-    scala:      'Scala code reviewer specializing in functional programming, type safety, and Spark optimization',
-    sql:        'SQL code reviewer specializing in query optimization, indexing, and database performance',
-    terraform:  'Terraform code reviewer specializing in Infrastructure as Code, cloud security, and best practices',
+    pyspark:    'PySpark engineer specializing in big data, Spark optimization, and distributed processing',
+    python:     'Python engineer specializing in clean code, performance, security, and best practices',
+    typescript: 'TypeScript engineer specializing in type safety, async patterns, and Node.js best practices',
+    javascript: 'JavaScript engineer specializing in modern ES6+, async patterns, and web best practices',
+    scala:      'Scala engineer specializing in functional programming, type safety, and Spark optimization',
+    sql:        'SQL engineer specializing in query optimization, indexing, and database performance',
+    terraform:  'Terraform engineer specializing in Infrastructure as Code, cloud security, and best practices',
   };
 
   const context = languageContext[language.toLowerCase()] ??
     'software engineer specializing in code quality, security, and best practices';
 
+  const focusByType: Record<AnalysisType, string> = {
+    complexity: `Focus EXCLUSIVELY on code complexity issues:
+1. Functions or methods that are too long or do too many things (single responsibility violations)
+2. Deeply nested conditionals or loops (high cyclomatic complexity)
+3. Hard-to-follow control flow, spaghetti logic, or excessive early returns
+4. Large classes or modules that should be decomposed
+5. Duplicated logic that increases maintenance burden
+6. Overly complex expressions or data transformations that hurt readability`,
+
+    security: `Focus EXCLUSIVELY on security vulnerabilities:
+1. Injection flaws (SQL, command, LDAP, XPath injection)
+2. Authentication and authorization bypass
+3. Insecure data handling (plaintext secrets, unencrypted sensitive data)
+4. Insecure deserialization or unsafe eval/exec usage
+5. Missing input validation or output encoding
+6. Exposed credentials, tokens, or API keys in code
+7. Insecure cryptography or weak hashing algorithms
+8. Path traversal or arbitrary file access vulnerabilities`,
+
+    review: `Focus on semantic issues that require code understanding:
+1. Logic errors and semantic bugs
+2. Incorrect algorithm implementations or off-by-one errors
+3. Performance problems (N+1 queries, blocking I/O in hot paths, memory leaks)
+4. Race conditions, concurrency bugs, or incorrect async usage
+5. Missing or incorrect error handling
+6. Data flow issues (null dereferences, type mismatches)`,
+
+    quality: `Focus EXCLUSIVELY on code quality and maintainability:
+1. Violations of SOLID principles
+2. Missing or inadequate error handling and exception management
+3. Poor naming conventions or misleading variable/function names
+4. Lack of input validation at system boundaries
+5. Hard-coded magic numbers or strings that should be constants
+6. Missing null/undefined checks that could cause runtime failures
+7. Overly coupled code with poor separation of concerns
+8. Dead code, unreachable branches, or unused variables`,
+  };
+
   return `You are an expert ${context}.
 
-You are reviewing a file named \`${filePath}\` as part of an automated pull request code review gate.
+You are performing a **${analysisType.toUpperCase()} ANALYSIS** of \`${filePath}\` as part of an automated pull request pipeline.
 
-Focus ONLY on issues that require semantic understanding — pattern-based checks (hardcoded secrets, collect() usage, etc.) are handled separately by a rule engine. Do not repeat issues already caught by simple pattern matching.
+${focusByType[analysisType]}
 
-Identify:
-1. Logic errors and semantic bugs
-2. Security vulnerabilities (injection, auth bypass, insecure data handling)
-3. Performance problems (N+1 queries, blocking I/O in hot paths, memory leaks)
-4. Architectural concerns (tight coupling, missing error handling, race conditions)
-5. Critical data flow issues
+Pattern-based checks (hardcoded secrets detected by regex, etc.) are handled by a separate rule engine — do not repeat those.
 
 CODE TO ANALYZE (${filePath}):
 \`\`\`${language}
@@ -376,7 +419,7 @@ Return ONLY valid JSON in this exact format:
   "issues": [
     {
       "severity": "critical" | "high" | "medium" | "low" | "info",
-      "category": "Security" | "Performance" | "Logic" | "Architecture" | "Data Flow" | "Best Practice",
+      "category": "Security" | "Performance" | "Logic" | "Architecture" | "Complexity" | "Quality" | "Data Flow" | "Best Practice",
       "message": "Concise description of the issue",
       "lineNumber": 42,
       "suggestion": "Specific actionable fix",
@@ -385,7 +428,7 @@ Return ONLY valid JSON in this exact format:
   ]
 }
 
-If there are no issues, return: {"issues": []}
+If there are no issues in scope for this analysis type, return: {"issues": []}
 Return ONLY the JSON object. No markdown, no explanation.`;
 }
 
