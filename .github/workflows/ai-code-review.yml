@@ -387,7 +387,7 @@ jobs:
       # ── Step 9: Aggregate all code review results ─────────────────────────
       - name: Aggregate code review results
         id: aggregate
-        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
+        if: always() && steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
         run: |
           python3 << 'PYEOF'
           import json, os, sys
