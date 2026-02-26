@@ -217,7 +217,7 @@ jobs:
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
             ATTEMPT=$((ATTEMPT + 1))
             echo "Complexity analysis — attempt ${ATTEMPT}/${MAX_RETRIES}"
-            HTTP_STATUS=$(curl -s --max-time 300 --retry 0 \
+            HTTP_STATUS=$(curl -s --http1.0 --max-time 300 --retry 0 \
               -o /tmp/response_complexity.json -w "%{http_code}" \
               -X POST "${API_URL}/api/review/pr" \
               -H "Content-Type: application/json" \
@@ -261,7 +261,7 @@ jobs:
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
             ATTEMPT=$((ATTEMPT + 1))
             echo "Security scan — attempt ${ATTEMPT}/${MAX_RETRIES}"
-            HTTP_STATUS=$(curl -s --max-time 300 --retry 0 \
+            HTTP_STATUS=$(curl -s --http1.0 --max-time 300 --retry 0 \
               -o /tmp/response_security.json -w "%{http_code}" \
               -X POST "${API_URL}/api/review/pr" \
               -H "Content-Type: application/json" \
@@ -305,7 +305,7 @@ jobs:
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
             ATTEMPT=$((ATTEMPT + 1))
             echo "Code review — attempt ${ATTEMPT}/${MAX_RETRIES}"
-            HTTP_STATUS=$(curl -s --max-time 300 --retry 0 \
+            HTTP_STATUS=$(curl -s --http1.0 --max-time 300 --retry 0 \
               -o /tmp/response_review.json -w "%{http_code}" \
               -X POST "${API_URL}/api/review/pr" \
               -H "Content-Type: application/json" \
@@ -349,7 +349,7 @@ jobs:
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
             ATTEMPT=$((ATTEMPT + 1))
             echo "Quality analysis — attempt ${ATTEMPT}/${MAX_RETRIES}"
-            HTTP_STATUS=$(curl -s --max-time 300 --retry 0 \
+            HTTP_STATUS=$(curl -s --http1.0 --max-time 300 --retry 0 \
               -o /tmp/response_quality.json -w "%{http_code}" \
               -X POST "${API_URL}/api/review/pr" \
               -H "Content-Type: application/json" \
