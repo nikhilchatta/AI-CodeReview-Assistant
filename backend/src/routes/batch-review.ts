@@ -632,39 +632,6 @@ export function createBatchReviewRouter(): Router {
     }
   });
 
-  router.post('/review/pr', async (req: Request, res: Response) => {
-    const startTime = Date.now();
-
-    try {
-      const { files, options = {} } = req.body as {
-        prNumber?: number;
-        baseBranch?: string;
-        headBranch?: string;
-        files: Array<FileToReview & { status?: 'added' | 'modified' | 'deleted' }>;
-        options?: { threshold?: number; format?: 'json' | 'markdown' | 'sarif'; onlyChangedLines?: boolean };
-      };
-
-      if (!files || files.length === 0) {
-        return res.status(400).json({ error: 'files array is required' });
-      }
-
-      const reviewableFiles = files.filter(f => f.status !== 'deleted');
-
-      const batchReq = {
-        ...req,
-        body: {
-          files: reviewableFiles,
-          options: { ...options, threshold: options.threshold || 75, failOnCritical: true, failOnHigh: true },
-        },
-      };
-
-      return (router as any).handle(batchReq, res, () => {});
-    } catch (error: any) {
-      console.error('[BATCH-REVIEW] PR review failed:', error.message);
-      res.status(500).json({ error: 'PR review failed', details: error.message });
-    }
-  });
-
   router.get('/review/health', (_req: Request, res: Response) => {
     res.json({
       status: defaultClaude ? 'healthy' : 'degraded',
