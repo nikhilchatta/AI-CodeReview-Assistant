@@ -185,6 +185,21 @@ jobs:
           print(f"Payload ready: {len(files)} file(s)", file=sys.stderr)
           PYEOF
 
+      # ── Step 5b: Validate payload is non-empty before sending to API ────────
+      - name: Validate review payload
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
+        run: |
+          FILE_COUNT=$(jq '.files | length' /tmp/review_payload.json 2>/dev/null || echo 0)
+          echo "Payload file count: ${FILE_COUNT}"
+          echo "Payload size: $(wc -c < /tmp/review_payload.json) bytes"
+          jq '[.files[] | .path]' /tmp/review_payload.json
+
+          if [ "${FILE_COUNT}" -eq 0 ]; then
+            echo "::error::Payload files array is empty — nothing to review."
+            cat /tmp/review_payload.json
+            exit 1
+          fi
+
       # ── Step 6: Code complexity analysis ─────────────────────────────────
       - name: Code complexity analysis
         id: complexity
