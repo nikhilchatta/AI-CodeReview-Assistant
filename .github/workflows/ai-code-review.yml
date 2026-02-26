@@ -199,7 +199,7 @@ jobs:
             exit 0
           fi
 
-          PAYLOAD=$(jq '. + {"analysis_type": "complexity"}' /tmp/review_payload.json)
+          jq '. + {"analysis_type": "complexity"}' /tmp/review_payload.json > /tmp/payload_complexity.json
           MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
 
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
@@ -210,7 +210,7 @@ jobs:
               -X POST "${API_URL}/api/review/pr" \
               -H "Content-Type: application/json" \
               -H "x-api-key: ${API_KEY}" \
-              -d "$PAYLOAD")
+              -d @/tmp/payload_complexity.json)
             echo "HTTP status: ${HTTP_STATUS}"
             echo "::endgroup::"
             if [ "$HTTP_STATUS" = "200" ]; then
@@ -248,7 +248,7 @@ jobs:
             exit 0
           fi
 
-          PAYLOAD=$(jq '. + {"analysis_type": "security"}' /tmp/review_payload.json)
+          jq '. + {"analysis_type": "security"}' /tmp/review_payload.json > /tmp/payload_security.json
           MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
 
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
@@ -259,7 +259,7 @@ jobs:
               -X POST "${API_URL}/api/review/pr" \
               -H "Content-Type: application/json" \
               -H "x-api-key: ${API_KEY}" \
-              -d "$PAYLOAD")
+              -d @/tmp/payload_security.json)
             echo "HTTP status: ${HTTP_STATUS}"
             echo "::endgroup::"
             if [ "$HTTP_STATUS" = "200" ]; then
@@ -297,7 +297,7 @@ jobs:
             exit 0
           fi
 
-          PAYLOAD=$(jq '. + {"analysis_type": "review"}' /tmp/review_payload.json)
+          jq '. + {"analysis_type": "review"}' /tmp/review_payload.json > /tmp/payload_review.json
           MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
 
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
@@ -308,7 +308,7 @@ jobs:
               -X POST "${API_URL}/api/review/pr" \
               -H "Content-Type: application/json" \
               -H "x-api-key: ${API_KEY}" \
-              -d "$PAYLOAD")
+              -d @/tmp/payload_review.json)
             echo "HTTP status: ${HTTP_STATUS}"
             echo "::endgroup::"
             if [ "$HTTP_STATUS" = "200" ]; then
@@ -346,7 +346,7 @@ jobs:
             exit 0
           fi
 
-          PAYLOAD=$(jq '. + {"analysis_type": "quality"}' /tmp/review_payload.json)
+          jq '. + {"analysis_type": "quality"}' /tmp/review_payload.json > /tmp/payload_quality.json
           MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
 
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
@@ -357,7 +357,7 @@ jobs:
               -X POST "${API_URL}/api/review/pr" \
               -H "Content-Type: application/json" \
               -H "x-api-key: ${API_KEY}" \
-              -d "$PAYLOAD")
+              -d @/tmp/payload_quality.json)
             echo "HTTP status: ${HTTP_STATUS}"
             echo "::endgroup::"
             if [ "$HTTP_STATUS" = "200" ]; then
