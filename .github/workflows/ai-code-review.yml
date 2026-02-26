@@ -51,7 +51,10 @@ jobs:
           MAX_FILES: ${{ inputs.max_files }}
           EXTENSIONS: ${{ inputs.file_extensions }}
         run: |
-          git fetch origin "${BASE_REF}" --depth=1
+          # fetch-depth: 0 already pulled full history; just ensure origin/BASE_REF
+          # ref is up to date without making it shallow (--depth=1 would break
+          # the common-ancestor calculation in the 3-dot diff below).
+          git fetch origin "${BASE_REF}"
 
           # Use the explicit PR head SHA so this works for both pull_request
           # and pull_request_target triggers (for the latter, HEAD is the
