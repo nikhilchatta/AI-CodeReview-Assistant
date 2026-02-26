@@ -14,13 +14,13 @@ const PORT = process.env.PORT || 5001;
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
+// PR gate review route — must be registered BEFORE batch-review to avoid route shadowing
+app.use('/api', createPRReviewRouter());
+
 // Code review API routes
 app.use('/api', createAIAnalyzeRouter());
 app.use('/api', createAIPlatformRouter());
 app.use('/api', createBatchReviewRouter());
-
-// PR gate review route (GitHub Actions workflow entry point)
-app.use('/api', createPRReviewRouter());
 
 // Observability metrics routes
 app.use('/api', createMetricsRouter());
