@@ -114,11 +114,6 @@ export function createPRReviewRouter(): Router {
     try {
       const body = req.body as PRReviewRequest;
 
-      // ── Debug: log incoming body shape ──
-      console.log('[PR-REVIEW] Content-Type:', req.headers['content-type']);
-      console.log('[PR-REVIEW] Body keys:', Object.keys(body || {}));
-      console.log('[PR-REVIEW] files type:', typeof body?.files, Array.isArray(body?.files) ? `len=${body.files.length}` : 'not-array');
-
       // ── Validate request ──
       if (!body.files || !Array.isArray(body.files) || body.files.length === 0) {
         return res.status(400).json({ error: 'files array is required and must not be empty' });
