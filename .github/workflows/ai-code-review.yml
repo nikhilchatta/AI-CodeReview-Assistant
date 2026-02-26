@@ -14,7 +14,7 @@ on:
       timeout_minutes:
         description: Maximum minutes the review job is allowed to run
         type: number
-        default: 15
+        default: 30
     secrets:
       AI_AGENT_API_URL:
         required: true
@@ -49,10 +49,8 @@ jobs:
         run: |
           git fetch origin "${BASE_REF}" --depth=1
 
-          # Build glob patterns from extension list (e.g. ".py,.ts" -> "*.py *.ts")
           PATTERNS=$(echo "$EXTENSIONS" | tr ',' '\n' | sed 's/^\./\*./g' | tr '\n' ' ')
 
-          # Get changed/added/modified files only (not deleted), capped at max_files
           FILES=$(git diff --name-only --diff-filter=ACMRT \
             "origin/${BASE_REF}...HEAD" \
             -- $PATTERNS 2>/dev/null | head -n "$MAX_FILES")
@@ -104,7 +102,6 @@ jobs:
             '.tf':    'terraform',
           }
 
-          # Use GITHUB_WORKSPACE for reliable absolute path resolution
           workspace = os.environ.get('GITHUB_WORKSPACE', '')
 
           files = []
@@ -123,7 +120,6 @@ jobs:
             try:
               with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
-              # Truncate large files to 100 KB to keep tokens manageable
               if len(content) > 102400:
                 content = content[:102400]
                 print(f"Truncated {fpath} to 100 KB", file=sys.stderr)
@@ -157,100 +153,327 @@ jobs:
           print(f"Payload ready: {len(files)} file(s)", file=sys.stderr)
           PYEOF
 
-      # ── Step 5: Call AWS AI agent with exponential-backoff retry ─────────
-      - name: Call AI Review Agent
+      # ── Validate secrets ─────────────────────────────────────────────────
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.AI_AGENT_API_URL }}" ] || [ -z "${{ secrets.AI_AGENT_API_KEY }}" ]; then
+            echo "::error::Secrets not injected into reusable workflow"
+            exit 1
+          fi
+
+      # ── Step 5: Code complexity analysis ─────────────────────────────────
+      - name: Code complexity analysis
+        id: complexity
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
+        env:
+          API_URL: ${{ secrets.AI_AGENT_API_URL }}
+          API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
+        run: |
+          EMPTY='{"gate_status":"pass","status":"success","total_issues":0,"severity_breakdown":{"critical":0,"high":0,"medium":0,"low":0,"info":0},"validation_failures":[],"llm_findings":[],"per_file_results":[],"token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"cost_usd":0,"latency_ms":0}'
+
+          if [ ! -f /tmp/review_payload.json ]; then
+            echo "No payload — skipping complexity analysis."
+            echo "$EMPTY" > /tmp/response_complexity.json
+            exit 0
+          fi
+
+          PAYLOAD=$(jq '. + {"analysis_type": "complexity"}' /tmp/review_payload.json)
+          MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
+
+          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "::group::Complexity analysis — attempt ${ATTEMPT}/${MAX_RETRIES}"
+            HTTP_STATUS=$(curl -s --max-time 300 --retry 0 \
+              -o /tmp/response_complexity.json -w "%{http_code}" \
+              -X POST "${API_URL}/api/review/pr" \
+              -H "Content-Type: application/json" \
+              -H "x-api-key: ${API_KEY}" \
+              -d "$PAYLOAD")
+            echo "HTTP status: ${HTTP_STATUS}"
+            echo "::endgroup::"
+            if [ "$HTTP_STATUS" = "200" ]; then
+              SUCCESS=true; break
+            elif [ "$HTTP_STATUS" = "429" ] || [ "$HTTP_STATUS" -ge "500" ] 2>/dev/null; then
+              echo "Transient error (HTTP ${HTTP_STATUS}). Waiting ${RETRY_DELAY}s before retry..."
+              sleep "$RETRY_DELAY"; RETRY_DELAY=$((RETRY_DELAY * 2))
+            else
+              echo "::error::Complexity analysis API error: HTTP ${HTTP_STATUS}"
+              cat /tmp/response_complexity.json; exit 1
+            fi
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "::error::Complexity analysis failed after ${MAX_RETRIES} attempts."
+            exit 1
+          fi
+
+          echo "Complexity analysis complete."
+          jq '{total_issues: .total_issues, severity: .severity_breakdown}' /tmp/response_complexity.json 2>/dev/null || true
+
+      # ── Step 6: AI security scan ──────────────────────────────────────────
+      - name: AI security scan
+        id: security
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
+        env:
+          API_URL: ${{ secrets.AI_AGENT_API_URL }}
+          API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
+        run: |
+          EMPTY='{"gate_status":"pass","status":"success","total_issues":0,"severity_breakdown":{"critical":0,"high":0,"medium":0,"low":0,"info":0},"validation_failures":[],"llm_findings":[],"per_file_results":[],"token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"cost_usd":0,"latency_ms":0}'
+
+          if [ ! -f /tmp/review_payload.json ]; then
+            echo "No payload — skipping security scan."
+            echo "$EMPTY" > /tmp/response_security.json
+            exit 0
+          fi
+
+          PAYLOAD=$(jq '. + {"analysis_type": "security"}' /tmp/review_payload.json)
+          MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
+
+          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "::group::Security scan — attempt ${ATTEMPT}/${MAX_RETRIES}"
+            HTTP_STATUS=$(curl -s --max-time 300 --retry 0 \
+              -o /tmp/response_security.json -w "%{http_code}" \
+              -X POST "${API_URL}/api/review/pr" \
+              -H "Content-Type: application/json" \
+              -H "x-api-key: ${API_KEY}" \
+              -d "$PAYLOAD")
+            echo "HTTP status: ${HTTP_STATUS}"
+            echo "::endgroup::"
+            if [ "$HTTP_STATUS" = "200" ]; then
+              SUCCESS=true; break
+            elif [ "$HTTP_STATUS" = "429" ] || [ "$HTTP_STATUS" -ge "500" ] 2>/dev/null; then
+              echo "Transient error (HTTP ${HTTP_STATUS}). Waiting ${RETRY_DELAY}s before retry..."
+              sleep "$RETRY_DELAY"; RETRY_DELAY=$((RETRY_DELAY * 2))
+            else
+              echo "::error::Security scan API error: HTTP ${HTTP_STATUS}"
+              cat /tmp/response_security.json; exit 1
+            fi
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "::error::Security scan failed after ${MAX_RETRIES} attempts."
+            exit 1
+          fi
+
+          echo "Security scan complete."
+          jq '{total_issues: .total_issues, severity: .severity_breakdown}' /tmp/response_security.json 2>/dev/null || true
+
+      # ── Step 7: AI code review ────────────────────────────────────────────
+      - name: AI code review
         id: review
         if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
         env:
           API_URL: ${{ secrets.AI_AGENT_API_URL }}
           API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
         run: |
-          # If payload file is missing or empty, no reviewable files were found
+          EMPTY='{"gate_status":"pass","status":"success","total_issues":0,"severity_breakdown":{"critical":0,"high":0,"medium":0,"low":0,"info":0},"validation_failures":[],"llm_findings":[],"per_file_results":[],"token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"cost_usd":0,"latency_ms":0}'
+
           if [ ! -f /tmp/review_payload.json ]; then
-            echo "No payload file — no files matched supported languages. Skipping."
-            echo "gate_status=pass"        >> "$GITHUB_OUTPUT"
-            echo "status=success"          >> "$GITHUB_OUTPUT"
-            echo "total_issues=0"          >> "$GITHUB_OUTPUT"
-            echo "critical=0"              >> "$GITHUB_OUTPUT"
-            echo "high=0"                  >> "$GITHUB_OUTPUT"
-            echo "validation_failures=0"   >> "$GITHUB_OUTPUT"
+            echo "No payload — skipping code review."
+            echo "$EMPTY" > /tmp/response_review.json
             exit 0
           fi
 
-          # Debug: show payload summary
-          FILE_COUNT=$(jq '.files | length' /tmp/review_payload.json 2>/dev/null || echo "invalid JSON")
-          PAYLOAD_SIZE=$(wc -c < /tmp/review_payload.json)
-          echo "Payload: ${FILE_COUNT} file(s), ${PAYLOAD_SIZE} bytes"
-          jq '{file_count: (.files|length), files: [.files[].path], metadata: .metadata}' /tmp/review_payload.json 2>/dev/null || echo "Failed to parse payload JSON"
-
-          MAX_RETRIES=3
-          RETRY_DELAY=10
-          ATTEMPT=0
-          SUCCESS=false
+          PAYLOAD=$(jq '. + {"analysis_type": "review"}' /tmp/review_payload.json)
+          MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
 
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            echo "::group::API attempt ${ATTEMPT}/${MAX_RETRIES}"
-
-            HTTP_STATUS=$(curl -s \
-              --max-time 300 \
-              --retry 0 \
-              -o /tmp/review_response.json \
-              -w "%{http_code}" \
+            echo "::group::Code review — attempt ${ATTEMPT}/${MAX_RETRIES}"
+            HTTP_STATUS=$(curl -s --max-time 300 --retry 0 \
+              -o /tmp/response_review.json -w "%{http_code}" \
               -X POST "${API_URL}/api/review/pr" \
               -H "Content-Type: application/json" \
               -H "x-api-key: ${API_KEY}" \
-              -d @/tmp/review_payload.json)
-
+              -d "$PAYLOAD")
             echo "HTTP status: ${HTTP_STATUS}"
             echo "::endgroup::"
-
             if [ "$HTTP_STATUS" = "200" ]; then
-              SUCCESS=true
-              break
+              SUCCESS=true; break
             elif [ "$HTTP_STATUS" = "429" ] || [ "$HTTP_STATUS" -ge "500" ] 2>/dev/null; then
               echo "Transient error (HTTP ${HTTP_STATUS}). Waiting ${RETRY_DELAY}s before retry..."
-              sleep "$RETRY_DELAY"
-              RETRY_DELAY=$((RETRY_DELAY * 2))
+              sleep "$RETRY_DELAY"; RETRY_DELAY=$((RETRY_DELAY * 2))
             else
-              echo "::error::Non-retriable API error: HTTP ${HTTP_STATUS}"
-              cat /tmp/review_response.json
-              exit 1
+              echo "::error::Code review API error: HTTP ${HTTP_STATUS}"
+              cat /tmp/response_review.json; exit 1
             fi
           done
 
           if [ "$SUCCESS" != "true" ]; then
-            echo "::error::AI Review API failed after ${MAX_RETRIES} attempts."
+            echo "::error::Code review failed after ${MAX_RETRIES} attempts."
             exit 1
           fi
 
-          # Validate response structure
-          if ! jq -e '.gate_status' /tmp/review_response.json > /dev/null 2>&1; then
-            echo "::error::API response is missing gate_status field. Response:"
-            cat /tmp/review_response.json
+          echo "Code review complete."
+          jq '{total_issues: .total_issues, severity: .severity_breakdown}' /tmp/response_review.json 2>/dev/null || true
+
+      # ── Step 8: AI code quality analysis ─────────────────────────────────
+      - name: AI code quality analysis
+        id: quality_scan
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
+        env:
+          API_URL: ${{ secrets.AI_AGENT_API_URL }}
+          API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
+        run: |
+          EMPTY='{"gate_status":"pass","status":"success","total_issues":0,"severity_breakdown":{"critical":0,"high":0,"medium":0,"low":0,"info":0},"validation_failures":[],"llm_findings":[],"per_file_results":[],"token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"cost_usd":0,"latency_ms":0}'
+
+          if [ ! -f /tmp/review_payload.json ]; then
+            echo "No payload — skipping quality analysis."
+            echo "$EMPTY" > /tmp/response_quality.json
+            exit 0
+          fi
+
+          PAYLOAD=$(jq '. + {"analysis_type": "quality"}' /tmp/review_payload.json)
+          MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
+
+          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "::group::Quality analysis — attempt ${ATTEMPT}/${MAX_RETRIES}"
+            HTTP_STATUS=$(curl -s --max-time 300 --retry 0 \
+              -o /tmp/response_quality.json -w "%{http_code}" \
+              -X POST "${API_URL}/api/review/pr" \
+              -H "Content-Type: application/json" \
+              -H "x-api-key: ${API_KEY}" \
+              -d "$PAYLOAD")
+            echo "HTTP status: ${HTTP_STATUS}"
+            echo "::endgroup::"
+            if [ "$HTTP_STATUS" = "200" ]; then
+              SUCCESS=true; break
+            elif [ "$HTTP_STATUS" = "429" ] || [ "$HTTP_STATUS" -ge "500" ] 2>/dev/null; then
+              echo "Transient error (HTTP ${HTTP_STATUS}). Waiting ${RETRY_DELAY}s before retry..."
+              sleep "$RETRY_DELAY"; RETRY_DELAY=$((RETRY_DELAY * 2))
+            else
+              echo "::error::Quality analysis API error: HTTP ${HTTP_STATUS}"
+              cat /tmp/response_quality.json; exit 1
+            fi
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "::error::Quality analysis failed after ${MAX_RETRIES} attempts."
             exit 1
           fi
 
-          # Export key values for downstream steps
-          GATE_STATUS=$(jq -r '.gate_status'                      /tmp/review_response.json)
-          STATUS=$(jq -r '.status'                                 /tmp/review_response.json)
-          TOTAL_ISSUES=$(jq -r '.total_issues'                     /tmp/review_response.json)
-          CRITICAL=$(jq -r '.severity_breakdown.critical // 0'     /tmp/review_response.json)
-          HIGH=$(jq -r '.severity_breakdown.high // 0'             /tmp/review_response.json)
-          VAL_FAILURES=$(jq -r '.validation_failures | length'     /tmp/review_response.json)
+          echo "Quality analysis complete."
+          jq '{total_issues: .total_issues, severity: .severity_breakdown}' /tmp/response_quality.json 2>/dev/null || true
 
-          {
-            echo "gate_status=${GATE_STATUS}"
-            echo "status=${STATUS}"
-            echo "total_issues=${TOTAL_ISSUES}"
-            echo "critical=${CRITICAL}"
-            echo "high=${HIGH}"
-            echo "validation_failures=${VAL_FAILURES}"
-          } >> "$GITHUB_OUTPUT"
+      # ── Step 9: Aggregate all code review results ─────────────────────────
+      - name: Aggregate code review results
+        id: aggregate
+        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys
 
-          echo "Review complete: gate=${GATE_STATUS}, issues=${TOTAL_ISSUES} (${CRITICAL}C / ${HIGH}H), validation_failures=${VAL_FAILURES}"
+          responses = {
+            'complexity': '/tmp/response_complexity.json',
+            'security':   '/tmp/response_security.json',
+            'review':     '/tmp/response_review.json',
+            'quality':    '/tmp/response_quality.json',
+          }
 
-      # ── Step 6: Post structured PR comment ───────────────────────────────
+          all_validation_failures = []
+          all_llm_findings        = []
+          all_per_file_results    = []
+          severity_totals = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0}
+          total_issues        = 0
+          total_input_tokens  = 0
+          total_output_tokens = 0
+          total_cost_usd      = 0.0
+          total_latency_ms    = 0
+          gate_fail           = False
+          run_id              = ''
+          model               = ''
+          files_reviewed      = 0
+          timestamp           = ''
+          per_analysis        = {}
+
+          for analysis_type, path in responses.items():
+            if not os.path.isfile(path):
+              print(f"Warning: missing response file {path}", file=sys.stderr)
+              per_analysis[analysis_type] = {}
+              continue
+            with open(path) as f:
+              r = json.load(f)
+            per_analysis[analysis_type] = r
+
+            vf = r.get('validation_failures', [])
+            for item in vf:
+              item['analysis_type'] = analysis_type
+            all_validation_failures.extend(vf)
+
+            lf = r.get('llm_findings', [])
+            for item in lf:
+              item['analysis_type'] = analysis_type
+            all_llm_findings.extend(lf)
+
+            all_per_file_results.extend(r.get('per_file_results', []))
+
+            sb = r.get('severity_breakdown', {})
+            for sev in severity_totals:
+              severity_totals[sev] += int(sb.get(sev, 0))
+
+            total_issues        += int(r.get('total_issues', 0))
+            tu = r.get('token_usage', {})
+            total_input_tokens  += int(tu.get('input_tokens', 0))
+            total_output_tokens += int(tu.get('output_tokens', 0))
+            total_cost_usd      += float(r.get('cost_usd', 0))
+            total_latency_ms    += int(r.get('latency_ms', 0))
+
+            if r.get('gate_status') == 'fail':
+              gate_fail = True
+            if not run_id and r.get('run_id'):
+              run_id = r['run_id']
+            if not model and r.get('model'):
+              model = r['model']
+            if not files_reviewed and r.get('files_reviewed'):
+              files_reviewed = r['files_reviewed']
+            if not timestamp and r.get('timestamp'):
+              timestamp = r['timestamp']
+
+          aggregated = {
+            'run_id':              run_id,
+            'gate_status':         'fail' if gate_fail else 'pass',
+            'status':              'failure' if gate_fail else 'success',
+            'total_issues':        total_issues,
+            'severity_breakdown':  severity_totals,
+            'validation_failures': all_validation_failures,
+            'llm_findings':        all_llm_findings,
+            'per_file_results':    all_per_file_results,
+            'token_usage': {
+              'input_tokens':  total_input_tokens,
+              'output_tokens': total_output_tokens,
+              'total_tokens':  total_input_tokens + total_output_tokens,
+            },
+            'cost_usd':       total_cost_usd,
+            'latency_ms':     total_latency_ms,
+            'model':          model,
+            'files_reviewed': files_reviewed,
+            'timestamp':      timestamp,
+            'per_analysis':   per_analysis,
+          }
+
+          with open('/tmp/review_response.json', 'w') as f:
+            json.dump(aggregated, f)
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as gf:
+            gf.write(f"gate_status={'fail' if gate_fail else 'pass'}\n")
+            gf.write(f"status={'failure' if gate_fail else 'success'}\n")
+            gf.write(f"total_issues={total_issues}\n")
+            gf.write(f"critical={severity_totals['critical']}\n")
+            gf.write(f"high={severity_totals['high']}\n")
+            gf.write(f"validation_failures={len(all_validation_failures)}\n")
+
+          print(
+            f"Aggregation complete: {total_issues} total issues, "
+            f"{severity_totals['critical']} critical, "
+            f"{len(all_validation_failures)} validation failures, "
+            f"gate={'FAIL' if gate_fail else 'PASS'}",
+            file=sys.stderr
+          )
+          PYEOF
+
+      # ── Step 10: Post structured PR comment ───────────────────────────────
       - name: Post PR review comment
         if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true' && always()
         uses: actions/github-script@v7
@@ -259,8 +482,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fs   = require('fs');
-            const path = require('path');
+            const fs = require('fs');
 
             const responseFile = '/tmp/review_response.json';
             if (!fs.existsSync(responseFile)) {
@@ -277,6 +499,7 @@ jobs:
             const headSha = pr.head.sha.slice(0, 8);
             const sb      = r.severity_breakdown || {};
             const tu      = r.token_usage || {};
+            const pa      = r.per_analysis || {};
 
             let body = `## ${gateEmoji} AI Code Review Gate — ${gateLabel}\n\n`;
             body += `| Field | Value |\n|---|---|\n`;
@@ -284,43 +507,115 @@ jobs:
             body += `| Branch | \`${pr.head.ref}\` |\n`;
             body += `| Commit | \`${headSha}\` |\n`;
             body += `| Files Reviewed | ${r.files_reviewed} |\n`;
-            body += `| Run Time | ${((r.latency_ms || 0) / 1000).toFixed(1)}s |\n`;
+            body += `| Total Run Time | ${((r.latency_ms || 0) / 1000).toFixed(1)}s |\n`;
             body += `| Run ID | \`${r.run_id}\` |\n\n`;
 
-            // Severity table
-            body += `### Severity Breakdown\n\n`;
+            // Overall severity table
+            body += `### Severity Breakdown (All Stages)\n\n`;
             body += `| 🔴 Critical | 🟠 High | 🟡 Medium | 🔵 Low | ⚪ Info |\n`;
             body += `|:---:|:---:|:---:|:---:|:---:|\n`;
             body += `| ${sb.critical||0} | ${sb.high||0} | ${sb.medium||0} | ${sb.low||0} | ${sb.info||0} |\n\n`;
 
-            // Validation failures (blocking)
-            const vf = r.validation_failures || [];
-            if (vf.length > 0) {
-              body += `### ❌ Validation Rule Violations (${vf.length}) — **Blocking**\n\n`;
+            // Stage results summary table
+            const stages = [
+              { key: 'complexity', label: '🔍 Code Complexity Analysis' },
+              { key: 'security',   label: '🔒 AI Security Scan'         },
+              { key: 'review',     label: '🤖 AI Code Review'           },
+              { key: 'quality',    label: '📐 AI Code Quality Analysis' },
+            ];
+
+            body += `### Stage Results Summary\n\n`;
+            body += `| Stage | Issues | Critical | High | Validation Failures |\n`;
+            body += `|---|:---:|:---:|:---:|:---:|\n`;
+            for (const s of stages) {
+              const sr  = pa[s.key] || {};
+              const ssb = sr.severity_breakdown || {};
+              const vfc = (sr.validation_failures || []).length;
+              body += `| ${s.label} | ${sr.total_issues||0} | ${ssb.critical||0} | ${ssb.high||0} | ${vfc} |\n`;
+            }
+            body += `\n`;
+
+            // Per-stage detailed findings (collapsible)
+            for (const s of stages) {
+              const sr  = pa[s.key] || {};
+              const vf  = sr.validation_failures || [];
+              const lf  = sr.llm_findings || [];
+              const critHighLLM = lf.filter(f => f.severity === 'critical' || f.severity === 'high');
+              const medLowLLM   = lf.filter(f => ['medium', 'low', 'info'].includes(f.severity));
+              if (vf.length === 0 && lf.length === 0) continue;
+
+              body += `<details>\n<summary>${s.label} — ${sr.total_issues||0} issue(s)</summary>\n\n`;
+
+              if (vf.length > 0) {
+                body += `#### ❌ Validation Failures (${vf.length})\n\n`;
+                for (const f of vf.slice(0, 15)) {
+                  const sev = (f.severity || 'unknown').toUpperCase();
+                  const loc = f.line_number ? ` (line ${f.line_number})` : '';
+                  body += `- **[${sev}]** \`${f.file}${loc}\`\n`;
+                  body += `  **${f.message}**\n`;
+                  body += `  > 💡 ${f.suggestion}\n\n`;
+                }
+                if (vf.length > 15) body += `_...and ${vf.length - 15} more._\n\n`;
+              }
+
+              if (critHighLLM.length > 0) {
+                body += `#### 🚨 Critical & High Findings (${critHighLLM.length})\n\n`;
+                for (const f of critHighLLM.slice(0, 10)) {
+                  const sev = (f.severity || 'unknown').toUpperCase();
+                  const loc = f.line_number ? ` (line ${f.line_number})` : '';
+                  body += `- **[${sev}]** \`${f.file}${loc}\` — ${f.category}\n`;
+                  body += `  **${f.message}**\n`;
+                  if (f.suggestion) body += `  > 💡 ${f.suggestion}\n`;
+                  if (f.reasoning)  body += `  > 🔍 ${f.reasoning}\n`;
+                  body += `\n`;
+                }
+              }
+
+              if (medLowLLM.length > 0) {
+                body += `#### ⚠️ Medium & Lower Findings (${medLowLLM.length})\n\n`;
+                for (const f of medLowLLM.slice(0, 10)) {
+                  const sev = (f.severity || 'unknown').toUpperCase();
+                  const loc = f.line_number ? ` (line ${f.line_number})` : '';
+                  body += `- **[${sev}]** \`${f.file}${loc}\` — ${f.message}\n`;
+                  if (f.suggestion) body += `  > 💡 ${f.suggestion}\n`;
+                  body += `\n`;
+                }
+                if (medLowLLM.length > 10) body += `_...and ${medLowLLM.length - 10} more._\n\n`;
+              }
+
+              body += `</details>\n\n`;
+            }
+
+            // All validation failures consolidated (blocking)
+            const allVf = r.validation_failures || [];
+            if (allVf.length > 0) {
+              body += `### ❌ Validation Rule Violations (${allVf.length}) — **Blocking**\n\n`;
               body += `> These violations are deterministic rule failures that block merge.\n\n`;
-              for (const f of vf.slice(0, 25)) {
-                const sev  = (f.severity || 'unknown').toUpperCase();
-                const loc  = f.line_number ? ` (line ${f.line_number})` : '';
-                body += `- **[${sev}]** \`${f.file}${loc}\`\n`;
+              for (const f of allVf.slice(0, 25)) {
+                const sev   = (f.severity || 'unknown').toUpperCase();
+                const loc   = f.line_number ? ` (line ${f.line_number})` : '';
+                const stage = f.analysis_type ? ` [${f.analysis_type}]` : '';
+                body += `- **[${sev}]**${stage} \`${f.file}${loc}\`\n`;
                 body += `  **${f.message}**\n`;
                 body += `  > 💡 ${f.suggestion}\n\n`;
               }
-              if (vf.length > 25) {
-                body += `_...and ${vf.length - 25} more violations. Fix all before merging._\n\n`;
+              if (allVf.length > 25) {
+                body += `_...and ${allVf.length - 25} more violations. Fix all before merging._\n\n`;
               }
             } else {
               body += `### ✅ Validation Rules — All Passed\n\n`;
             }
 
             // LLM findings — critical/high (blocking if critical)
-            const llm        = r.llm_findings || [];
+            const llm         = r.llm_findings || [];
             const critHighLLM = llm.filter(f => f.severity === 'critical' || f.severity === 'high');
             if (critHighLLM.length > 0) {
               body += `### 🤖 AI Findings — Critical & High (${critHighLLM.length})\n\n`;
               for (const f of critHighLLM.slice(0, 15)) {
-                const sev = (f.severity || 'unknown').toUpperCase();
-                const loc = f.line_number ? ` (line ${f.line_number})` : '';
-                body += `- **[${sev}]** \`${f.file}${loc}\` — ${f.category}\n`;
+                const sev   = (f.severity || 'unknown').toUpperCase();
+                const loc   = f.line_number ? ` (line ${f.line_number})` : '';
+                const stage = f.analysis_type ? ` [${f.analysis_type}]` : '';
+                body += `- **[${sev}]**${stage} \`${f.file}${loc}\` — ${f.category}\n`;
                 body += `  **${f.message}**\n`;
                 if (f.suggestion) body += `  > 💡 ${f.suggestion}\n`;
                 if (f.reasoning)  body += `  > 🔍 ${f.reasoning}\n`;
@@ -333,16 +628,17 @@ jobs:
             if (medLowLLM.length > 0) {
               body += `<details>\n<summary>🤖 AI Findings — Medium & Lower (${medLowLLM.length})</summary>\n\n`;
               for (const f of medLowLLM.slice(0, 30)) {
-                const sev = (f.severity || 'unknown').toUpperCase();
-                const loc = f.line_number ? ` (line ${f.line_number})` : '';
-                body += `- **[${sev}]** \`${f.file}${loc}\` — ${f.message}\n`;
+                const sev   = (f.severity || 'unknown').toUpperCase();
+                const loc   = f.line_number ? ` (line ${f.line_number})` : '';
+                const stage = f.analysis_type ? ` [${f.analysis_type}]` : '';
+                body += `- **[${sev}]**${stage} \`${f.file}${loc}\` — ${f.message}\n`;
                 if (f.suggestion) body += `  > 💡 ${f.suggestion}\n`;
                 body += `\n`;
               }
               body += `</details>\n\n`;
             }
 
-            if (llm.length === 0 && vf.length === 0) {
+            if (llm.length === 0 && allVf.length === 0) {
               body += `### 🤖 AI Analysis — No Issues Found\n\n`;
               body += `The AI reviewer found no issues in the changed files. Great work!\n\n`;
             }
@@ -361,15 +657,14 @@ jobs:
             }
 
             // Token usage and cost
-            body += `### 📊 Token Usage & Cost\n\n`;
+            body += `### 📊 Token Usage & Cost (All Stages)\n\n`;
             body += `| Metric | Value |\n|---|---|\n`;
             body += `| Input Tokens | ${(tu.input_tokens||0).toLocaleString()} |\n`;
             body += `| Output Tokens | ${(tu.output_tokens||0).toLocaleString()} |\n`;
             body += `| Total Tokens | ${(tu.total_tokens||0).toLocaleString()} |\n`;
             body += `| Model | \`${r.model||'unknown'}\` |\n`;
-            body += `| Cost | \`$${(r.cost_usd||0).toFixed(4)}\` |\n\n`;
+            body += `| Total Cost | \`$${(r.cost_usd||0).toFixed(4)}\` |\n\n`;
 
-            // Footer
             body += `---\n`;
             body += `*🤖 Powered by [AI Code Review Assistant](${process.env.AI_AGENT_API_URL}) `;
             body += `| Run \`${r.run_id}\` | ${new Date().toUTCString()}*\n`;
@@ -381,7 +676,7 @@ jobs:
               body,
             });
 
-      # ── Step 7: Emit summary metrics to observability backend ─────────────
+      # ── Step 11: Emit summary metrics to observability backend ────────────
       - name: Report summary metrics
         if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true' && always()
         env:
@@ -401,7 +696,6 @@ jobs:
 
           R=$(cat /tmp/review_response.json)
 
-          # Build summary metric payload using jq
           METRIC_PAYLOAD=$(jq -n \
             --arg  repo          "$REPO" \
             --arg  project_id    "$PROJECT_ID" \
@@ -438,7 +732,7 @@ jobs:
             -H "x-api-key: ${API_KEY}" \
             -d "$METRIC_PAYLOAD" || echo "Warning: summary metrics ingest failed (non-blocking)"
 
-      # ── Step 8: Emit full drill-down detail to observability backend ──────
+      # ── Step 12: Emit full drill-down detail to observability backend ──────
       - name: Report drill-down detail
         if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true' && always()
         env:
@@ -510,13 +804,13 @@ jobs:
             -H "x-api-key: ${API_KEY}" \
             -d "$DETAIL_PAYLOAD" || echo "Warning: drill-down detail storage failed (non-blocking)"
 
-      # ── Step 9: Enforce gate — fail the job if review failed ─────────────
-      - name: Enforce PR gate
+      # ── Step 13: Quality gate — enforce standards ─────────────────────────
+      - name: Quality gate — enforce standards
         if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
         env:
-          GATE_STATUS: ${{ steps.review.outputs.gate_status }}
-          CRITICAL: ${{ steps.review.outputs.critical }}
-          VAL_FAILURES: ${{ steps.review.outputs.validation_failures }}
+          GATE_STATUS:      ${{ steps.aggregate.outputs.gate_status }}
+          CRITICAL:         ${{ steps.aggregate.outputs.critical }}
+          VAL_FAILURES:     ${{ steps.aggregate.outputs.validation_failures }}
         run: |
           if [ "$GATE_STATUS" = "fail" ]; then
             echo "::error title=AI Code Review Gate FAILED::Found ${CRITICAL} critical issue(s) and ${VAL_FAILURES} validation failure(s)."
