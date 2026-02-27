@@ -156,9 +156,9 @@ jobs:
                   return st, {'_raw': raw.decode('utf-8', errors='replace')}
 
           # ── config from environment ──────────────────────────────────────────
-          API_URL  = os.environ['API_URL'].rstrip('/')
-          API_KEY  = os.environ['API_KEY']
-          GH_TOKEN = os.environ['GH_TOKEN']
+          API_URL  = os.environ['API_URL'].strip().rstrip('/')
+          API_KEY  = os.environ['API_KEY'].strip()
+          GH_TOKEN = os.environ['GH_TOKEN'].strip()
           REPO     = os.environ['REPO']
           RUN_ID   = os.environ['RUN_ID']
           PR_NUM   = int(os.environ.get('PR_NUMBER') or 0)
