@@ -1,5 +1,8 @@
 name: AI Code Review Gate
 
+# Reusable workflow — called by ai-review.yml in any target repository.
+# Uses Python's http.client for all backend calls (avoids curl/nginx body issues).
+
 on:
   workflow_call:
     inputs:
@@ -18,7 +21,7 @@ on:
     secrets:
       AI_AGENT_API_URL:
         required: true
-        description: Base URL of the AWS-hosted AI agent backend
+        description: Base URL of the AI agent backend (e.g. http://1.2.3.4)
       AI_AGENT_API_KEY:
         required: true
         description: API key for authenticating with the AI agent backend
@@ -34,812 +37,428 @@ jobs:
 
     steps:
 
-      # ── Step 1: Verify EC2 backend is reachable ───────────────────────────
+      # ── Step 1: Verify backend is reachable ─────────────────────────────────
       - name: Verify backend connectivity
         env:
           API_URL: ${{ secrets.AI_AGENT_API_URL }}
           API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
         run: |
-          echo "Checking backend at ${API_URL}/api/health ..."
+          echo "Checking ${API_URL}/api/health ..."
           HTTP_STATUS=$(curl -s --max-time 15 \
-            -o /tmp/health_response.json -w "%{http_code}" \
+            -o /tmp/health.json -w "%{http_code}" \
             -H "x-api-key: ${API_KEY}" \
             "${API_URL}/api/health")
-          echo "Health check HTTP status: ${HTTP_STATUS}"
+          echo "Health status: ${HTTP_STATUS}"
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::EC2 backend is not reachable (HTTP ${HTTP_STATUS}). Check that the instance is running and AI_AGENT_API_URL is correct."
-            cat /tmp/health_response.json 2>/dev/null || true
+            echo "::error::Backend not reachable (HTTP ${HTTP_STATUS}). Check AI_AGENT_API_URL secret."
+            cat /tmp/health.json 2>/dev/null || true
             exit 1
           fi
-          echo "Backend is healthy: $(cat /tmp/health_response.json)"
+          cat /tmp/health.json
 
-      # ── Step 2: Checkout PR code with full history for diff ──────────────
+      # ── Step 2: Checkout PR code with full history for diff ─────────────────
       - name: Checkout PR code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      # ── Step 3: Compute changed files from PR diff ───────────────────────
-      - name: Compute changed files from PR diff
+      # ── Step 3: Compute changed files from PR diff ──────────────────────────
+      - name: Compute changed files
         id: diff
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_REF:    ${{ github.base_ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          MAX_FILES: ${{ inputs.max_files }}
-          EXTENSIONS: ${{ inputs.file_extensions }}
+          MAX_FILES:   ${{ inputs.max_files }}
+          EXTENSIONS:  ${{ inputs.file_extensions }}
         run: |
           git fetch origin "${BASE_REF}"
-
           DIFF_HEAD="${PR_HEAD_SHA:-HEAD}"
-          echo "Diffing: origin/${BASE_REF}...${DIFF_HEAD}"
-          echo "HEAD commit: $(git rev-parse HEAD)"
-
-          ALL_FILES=$(git diff --name-only --diff-filter=ACMRT \
-            "origin/${BASE_REF}...${DIFF_HEAD}" 2>/dev/null || true)
-          echo "All changed files (unfiltered):"
-          echo "${ALL_FILES:-  (none)}"
+          echo "Diff: origin/${BASE_REF}...${DIFF_HEAD}"
 
           PATTERNS=$(echo "$EXTENSIONS" | tr ',' '\n' | sed 's/^\./\*./g' | tr '\n' ' ')
-          echo "Extension patterns: ${PATTERNS}"
-
           FILES=$(git diff --name-only --diff-filter=ACMRT \
             "origin/${BASE_REF}...${DIFF_HEAD}" \
             -- $PATTERNS 2>/dev/null | head -n "$MAX_FILES")
 
           if [ -z "$FILES" ]; then
             echo "no_files=true" >> "$GITHUB_OUTPUT"
-            echo "No relevant files changed in this PR. Skipping AI review."
+            echo "No matching files changed — skipping AI review."
           else
             echo "no_files=false" >> "$GITHUB_OUTPUT"
-            echo "$FILES" > /tmp/changed_files.txt
             FILE_COUNT=$(echo "$FILES" | wc -l | tr -d ' ')
             echo "file_count=${FILE_COUNT}" >> "$GITHUB_OUTPUT"
-            echo "Found ${FILE_COUNT} file(s) to review:"
+            echo "$FILES" > /tmp/changed_files.txt
+            echo "Files to review (${FILE_COUNT}):"
             cat /tmp/changed_files.txt
           fi
 
-      # ── Step 4: Early exit when no reviewable files ──────────────────────
+      # ── Step 4: Skip when no reviewable files ───────────────────────────────
       - name: Skip — no reviewable files changed
         if: steps.diff.outputs.no_files == 'true'
         run: |
-          echo "No files matching [ ${{ inputs.file_extensions }} ] were changed."
+          echo "No files matching [${{ inputs.file_extensions }}] were changed."
           echo "AI code review gate skipped — nothing to review."
 
-      # ── Step 5: Build JSON payload from changed files ────────────────────
-      - name: Build review payload
-        id: payload
+      # ── Step 5: AI review → PR comment → record metrics ─────────────────────
+      #
+      # Uses Python http.client directly — no curl — so Content-Length is always
+      # set correctly and no nginx proxy_request_buffering issues can drop the body.
+      - name: AI review, post comment, record metrics
+        id: review
         if: steps.diff.outputs.no_files == 'false'
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_HEAD_REF: ${{ github.head_ref }}
-          GITHUB_BASE_REF: ${{ github.base_ref }}
-          GITHUB_SHA: ${{ github.sha }}
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
+          API_URL:    ${{ secrets.AI_AGENT_API_URL }}
+          API_KEY:    ${{ secrets.AI_AGENT_API_KEY }}
+          GH_TOKEN:   ${{ github.token }}
+          PR_NUMBER:  ${{ github.event.pull_request.number }}
+          REPO:       ${{ github.repository }}
+          HEAD_REF:   ${{ github.head_ref }}
+          BASE_REF:   ${{ github.base_ref }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR:      ${{ github.actor }}
+          RUN_ID:     ${{ github.run_id }}
         run: |
           python3 << 'PYEOF'
-          import json, os, sys
+          import json, os, sys, time, ssl
+          import http.client, urllib.parse
+
+          # ── helper: POST JSON via Python http.client (no curl) ───────────────
+          def api_post(base_url, path, payload, extra_headers=None):
+              parsed = urllib.parse.urlparse(base_url)
+              host   = parsed.hostname
+              port   = parsed.port or (443 if parsed.scheme == 'https' else 80)
+              body   = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+              hdrs   = {
+                  'Content-Type':   'application/json; charset=utf-8',
+                  'Content-Length': str(len(body)),
+                  'Connection':     'close',
+              }
+              if extra_headers:
+                  hdrs.update(extra_headers)
+              try:
+                  if parsed.scheme == 'https':
+                      conn = http.client.HTTPSConnection(
+                          host, port, timeout=300,
+                          context=ssl.create_default_context())
+                  else:
+                      conn = http.client.HTTPConnection(host, port, timeout=300)
+                  conn.request('POST', path, body=body, headers=hdrs)
+                  resp = conn.getresponse()
+                  st   = resp.status
+                  raw  = resp.read()
+                  conn.close()
+              except Exception as e:
+                  raise RuntimeError(f'HTTP request to {host}{path} failed: {e}')
+              try:
+                  return st, json.loads(raw)
+              except Exception:
+                  return st, {'_raw': raw.decode('utf-8', errors='replace')}
+
+          # ── config from environment ──────────────────────────────────────────
+          API_URL  = os.environ['API_URL'].rstrip('/')
+          API_KEY  = os.environ['API_KEY']
+          GH_TOKEN = os.environ['GH_TOKEN']
+          REPO     = os.environ['REPO']
+          RUN_ID   = os.environ['RUN_ID']
+          PR_NUM   = int(os.environ.get('PR_NUMBER') or 0)
+          ACTOR    = os.environ.get('ACTOR', '')
+          BRANCH   = os.environ.get('HEAD_REF', '')
+          BASE_BR  = os.environ.get('BASE_REF', '')
+          SHA      = os.environ.get('COMMIT_SHA', '')
+          PROJECT  = REPO.split('/')[-1]
+          WS       = os.environ.get('GITHUB_WORKSPACE', '')
+          GH_OUT   = os.environ.get('GITHUB_OUTPUT', '/dev/null')
 
           EXT_LANG = {
-            '.py':    'python',
-            '.pyspark': 'pyspark',
-            '.ts':    'typescript',
-            '.tsx':   'typescript',
-            '.js':    'javascript',
-            '.jsx':   'javascript',
-            '.scala': 'scala',
-            '.sql':   'sql',
-            '.tf':    'terraform',
+              '.py':     'python',
+              '.pyspark':'pyspark',
+              '.ts':     'typescript',
+              '.tsx':    'typescript',
+              '.js':     'javascript',
+              '.jsx':    'javascript',
+              '.scala':  'scala',
+              '.sql':    'sql',
+              '.tf':     'terraform',
           }
 
-          workspace = os.environ.get('GITHUB_WORKSPACE', '')
-
+          # ── build files array from diff output ───────────────────────────────
           files = []
           with open('/tmp/changed_files.txt') as fh:
-            paths = [line.strip() for line in fh if line.strip()]
+              paths = [l.strip() for l in fh if l.strip()]
 
           for fpath in paths:
-            full_path = os.path.join(workspace, fpath) if workspace else fpath
-            if not os.path.isfile(full_path):
-              print(f"Skip (deleted/missing): {fpath}", file=sys.stderr)
-              continue
-            ext = os.path.splitext(fpath)[1].lower()
-            language = EXT_LANG.get(ext)
-            if not language:
-              continue
-            try:
-              with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
-                content = f.read()
-              if len(content) > 102400:
-                content = content[:102400]
-                print(f"Truncated {fpath} to 100 KB", file=sys.stderr)
-              files.append({'path': fpath, 'content': content, 'language': language})
-            except Exception as e:
-              print(f"Warning — could not read {fpath}: {e}", file=sys.stderr)
+              full = os.path.join(WS, fpath) if WS else fpath
+              if not os.path.isfile(full):
+                  print(f'[skip] not found: {fpath}', file=sys.stderr)
+                  continue
+              ext  = os.path.splitext(fpath)[1].lower()
+              lang = EXT_LANG.get(ext)
+              if not lang:
+                  continue
+              try:
+                  with open(full, 'r', encoding='utf-8', errors='replace') as f:
+                      content = f.read()
+                  if len(content) > 102400:
+                      content = content[:102400]
+                      print(f'[warn] truncated {fpath} to 100 KB', file=sys.stderr)
+                  files.append({'path': fpath, 'content': content, 'language': lang})
+              except Exception as e:
+                  print(f'[warn] cannot read {fpath}: {e}', file=sys.stderr)
 
           if not files:
-            print("No readable files found after filtering.", file=sys.stderr)
-            with open(os.environ['GITHUB_OUTPUT'], 'a') as gf:
-              gf.write("no_files=true\n")
-            sys.exit(0)
+              print('No readable files after filtering — skipping.', file=sys.stderr)
+              with open(GH_OUT, 'a') as gf:
+                  gf.write('gate_status=pass\ntotal_issues=0\ncritical_count=0\n')
+              sys.exit(0)
 
-          payload = {
-            'files': files,
-            'metadata': {
-              'repository':      os.environ.get('GITHUB_REPOSITORY', ''),
-              'pr_number':       int(os.environ.get('PR_NUMBER') or 0),
-              'branch':          os.environ.get('GITHUB_HEAD_REF', ''),
-              'base_branch':     os.environ.get('GITHUB_BASE_REF', ''),
-              'commit_sha':      os.environ.get('GITHUB_SHA', ''),
-              'actor':           os.environ.get('GITHUB_ACTOR', ''),
-              'workflow_run_id': os.environ.get('GITHUB_RUN_ID', ''),
-              'project_id':      os.environ.get('GITHUB_REPOSITORY', '').split('/')[-1],
-            }
+          print(f'[review] Submitting {len(files)} file(s) to {API_URL}/api/review/pr ...', file=sys.stderr)
+
+          review_payload = {
+              'files':         files,
+              'analysis_type': 'review',
+              'metadata': {
+                  'repository':      REPO,
+                  'pr_number':       PR_NUM,
+                  'branch':          BRANCH,
+                  'base_branch':     BASE_BR,
+                  'commit_sha':      SHA,
+                  'actor':           ACTOR,
+                  'workflow_run_id': RUN_ID,
+                  'project_id':      PROJECT,
+              },
           }
 
-          with open('/tmp/review_payload.json', 'w') as f:
-            json.dump(payload, f)
+          # ── call /api/review/pr via Python http.client ───────────────────────
+          t0 = time.time()
+          try:
+              http_st, review = api_post(
+                  API_URL, '/api/review/pr', review_payload,
+                  extra_headers={'x-api-key': API_KEY})
+          except Exception as e:
+              print(f'::error::Review API call failed: {e}', file=sys.stderr)
+              with open(GH_OUT, 'a') as gf:
+                  gf.write('gate_status=fail\ntotal_issues=0\ncritical_count=0\n')
+              sys.exit(1)
 
-          print(f"Payload ready: {len(files)} file(s)", file=sys.stderr)
+          elapsed_ms = int((time.time() - t0) * 1000)
+
+          if http_st != 200:
+              print(f'::error::Review API returned HTTP {http_st}: {review}', file=sys.stderr)
+              with open(GH_OUT, 'a') as gf:
+                  gf.write('gate_status=fail\ntotal_issues=0\ncritical_count=0\n')
+              sys.exit(1)
+
+          gate         = review.get('gate_status', 'pass')
+          run_id_full  = review.get('run_id', RUN_ID)
+          severity     = review.get('severity_breakdown', {})
+          val_fails    = review.get('validation_failures', [])
+          llm_finds    = review.get('llm_findings', [])
+          per_file     = review.get('per_file_results', [])
+          total_issues = review.get('total_issues', 0)
+          files_rev    = review.get('files_reviewed', len(files))
+          tok_in       = review.get('token_usage', {}).get('input_tokens', 0)
+          tok_out      = review.get('token_usage', {}).get('output_tokens', 0)
+          tok_tot      = review.get('token_usage', {}).get('total_tokens', tok_in + tok_out)
+          cost         = review.get('cost_usd', 0)
+          model        = review.get('model', '')
+          rev_latency  = review.get('latency_ms', elapsed_ms)
+
+          print(f'[review] gate={gate}, issues={total_issues}, '
+                f'tokens={tok_tot}, cost=${cost:.6f}, latency={elapsed_ms}ms',
+                file=sys.stderr)
+
+          # ── build PR comment ─────────────────────────────────────────────────
+          passed = gate == 'pass'
+          lines  = [
+              f'## {"✅ AI Code Review — PASSED" if passed else "❌ AI Code Review — FAILED"}',
+              '',
+              f'**Gate:** `{gate.upper()}` | **Issues:** {total_issues} | **Files reviewed:** {files_rev}',
+              '',
+              '| Severity | Critical | High | Medium | Low | Info |',
+              '|----------|:--------:|:----:|:------:|:---:|:----:|',
+              f'| Count    | {severity.get("critical",0)} | {severity.get("high",0)} | '
+              f'{severity.get("medium",0)} | {severity.get("low",0)} | {severity.get("info",0)} |',
+          ]
+
+          if val_fails:
+              lines += ['', '### Validation Failures (pattern rules)']
+              for v in val_fails[:25]:
+                  sev = v.get('severity', '?').upper()
+                  cat = v.get('category', '')
+                  msg = v.get('message', '')
+                  loc = v.get('file', '')
+                  ln  = v.get('line_number')
+                  if ln:
+                      loc = f'{loc}:{ln}'
+                  lines.append(f'- **[{sev}]** `{cat}` — {msg}')
+                  lines.append(f'  📍 `{loc}`')
+                  if v.get('suggestion'):
+                      lines.append(f'  > 💡 {v["suggestion"]}')
+              if len(val_fails) > 25:
+                  lines.append(f'- *…and {len(val_fails) - 25} more validation failures*')
+
+          if llm_finds:
+              lines += ['', '### AI Findings']
+              for f_ in llm_finds[:25]:
+                  sev = f_.get('severity', '?').upper()
+                  cat = f_.get('category', '')
+                  msg = f_.get('message', '')
+                  loc = f_.get('file', '')
+                  ln  = f_.get('line_number')
+                  if ln:
+                      loc = f'{loc}:{ln}'
+                  lines.append(f'- **[{sev}]** `{cat}` — {msg}')
+                  lines.append(f'  📍 `{loc}`')
+                  if f_.get('suggestion'):
+                      lines.append(f'  > 💡 {f_["suggestion"]}')
+                  if f_.get('reasoning'):
+                      lines.append(f'  > ℹ️ {f_["reasoning"]}')
+              if len(llm_finds) > 25:
+                  lines.append(f'- *…and {len(llm_finds) - 25} more AI findings*')
+
+          if not val_fails and not llm_finds:
+              lines += ['', '*No issues found. Great work! 🎉*']
+
+          lines += [
+              '',
+              f'<sub>Model: `{model}` | Tokens: {tok_tot:,} | Cost: ${cost:.6f} | Run: `{run_id_full}`</sub>',
+          ]
+
+          comment_body = '\n'.join(lines)
+
+          # ── post PR comment via GitHub API ───────────────────────────────────
+          try:
+              gh_body = json.dumps({'body': comment_body}).encode('utf-8')
+              gh_conn = http.client.HTTPSConnection(
+                  'api.github.com', 443, timeout=30,
+                  context=ssl.create_default_context())
+              gh_conn.request(
+                  'POST', f'/repos/{REPO}/issues/{PR_NUM}/comments',
+                  body=gh_body,
+                  headers={
+                      'Content-Type':          'application/json',
+                      'Content-Length':        str(len(gh_body)),
+                      'Authorization':         f'Bearer {GH_TOKEN}',
+                      'User-Agent':            'AI-CodeReview-Bot/1.0',
+                      'Accept':                'application/vnd.github+json',
+                      'X-GitHub-Api-Version':  '2022-11-28',
+                      'Connection':            'close',
+                  })
+              gh_resp = gh_conn.getresponse()
+              gh_st   = gh_resp.status
+              gh_conn.close()
+              if gh_st in (200, 201):
+                  print(f'[comment] PR comment posted (HTTP {gh_st})', file=sys.stderr)
+              else:
+                  print(f'::warning::PR comment returned HTTP {gh_st}', file=sys.stderr)
+          except Exception as e:
+              print(f'::warning::PR comment failed: {e}', file=sys.stderr)
+
+          # ── post to /api/metrics/ingest ──────────────────────────────────────
+          metrics_pl = {
+              'repository':      REPO,
+              'project_id':      PROJECT,
+              'workflow_run_id': RUN_ID,
+              'timestamp':       review.get('timestamp', ''),
+              'request_count':   1,
+              'input_tokens':    tok_in,
+              'output_tokens':   tok_out,
+              'total_tokens':    tok_tot,
+              'latency_ms':      rev_latency,
+              'status':          review.get('status', 'success'),
+              'files_reviewed':  files_rev,
+              'issues_found':    total_issues,
+              'critical_count':  severity.get('critical', 0),
+              'high_count':      severity.get('high', 0),
+              'model':           model,
+              'cost_usd':        cost,
+              'pr_number':       PR_NUM,
+              'branch':          BRANCH,
+              'triggered_by':    ACTOR,
+              'source':          'pipeline',
+          }
+          metric_id = None
+          try:
+              ms_st, ms_resp = api_post(
+                  API_URL, '/api/metrics/ingest', metrics_pl,
+                  extra_headers={'x-api-key': API_KEY})
+              if ms_st in (200, 201):
+                  metric_id = ms_resp.get('id')
+                  print(f'[metrics] ingest recorded (id={metric_id})', file=sys.stderr)
+              else:
+                  print(f'::warning::Metrics ingest HTTP {ms_st}: {ms_resp}', file=sys.stderr)
+          except Exception as e:
+              print(f'::warning::Metrics ingest failed: {e}', file=sys.stderr)
+
+          # ── post to /api/metrics/runs ────────────────────────────────────────
+          run_detail = {
+              'run_id':               run_id_full,
+              'metric_id':            metric_id,
+              'repository':           REPO,
+              'pr_number':            PR_NUM,
+              'commit_sha':           SHA,
+              'actor':                ACTOR,
+              'branch':               BRANCH,
+              'base_branch':          BASE_BR,
+              'workflow_run_id':      RUN_ID,
+              'project_id':           PROJECT,
+              'gate_status':          gate,
+              'status':               review.get('status', 'success'),
+              'validation_failures':  val_fails,
+              'llm_findings':         llm_finds,
+              'per_file_results':     per_file,
+              'severity_distribution': severity,
+              'total_issues':         total_issues,
+              'critical_count':       severity.get('critical', 0),
+              'high_count':           severity.get('high', 0),
+              'medium_count':         severity.get('medium', 0),
+              'low_count':            severity.get('low', 0),
+              'files_reviewed':       files_rev,
+              'input_tokens':         tok_in,
+              'output_tokens':        tok_out,
+              'total_tokens':         tok_tot,
+              'cost_usd':             cost,
+              'model':                model,
+              'latency_ms':           rev_latency,
+              'timestamp':            review.get('timestamp', ''),
+              'runtime_ms':           elapsed_ms,
+              'source':               'pipeline',
+          }
+          try:
+              rd_st, rd_resp = api_post(
+                  API_URL, '/api/metrics/runs', run_detail,
+                  extra_headers={'x-api-key': API_KEY})
+              if rd_st in (200, 201):
+                  print(f'[runs] run detail stored (run_id={run_id_full})', file=sys.stderr)
+              else:
+                  print(f'::warning::Run detail HTTP {rd_st}: {rd_resp}', file=sys.stderr)
+          except Exception as e:
+              print(f'::warning::Run detail store failed: {e}', file=sys.stderr)
+
+          # ── write step outputs ───────────────────────────────────────────────
+          with open(GH_OUT, 'a') as gf:
+              gf.write(f'gate_status={gate}\n')
+              gf.write(f'total_issues={total_issues}\n')
+              gf.write(f'critical_count={severity.get("critical", 0)}\n')
+
+          print(f'[done] gate={gate}, issues={total_issues}', file=sys.stderr)
           PYEOF
 
-      # ── Step 5b: Validate payload is non-empty before sending to API ────────
-      - name: Validate review payload
-        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
+      # ── Step 6: Enforce gate result ──────────────────────────────────────────
+      - name: AI Code Review Gate
+        if: always() && steps.diff.outputs.no_files == 'false'
         run: |
-          FILE_COUNT=$(jq '.files | length' /tmp/review_payload.json 2>/dev/null || echo 0)
-          echo "Payload file count: ${FILE_COUNT}"
-          echo "Payload size: $(wc -c < /tmp/review_payload.json) bytes"
-          jq '[.files[] | .path]' /tmp/review_payload.json
+          GATE="${{ steps.review.outputs.gate_status }}"
+          ISSUES="${{ steps.review.outputs.total_issues }}"
+          CRIT="${{ steps.review.outputs.critical_count }}"
 
-          if [ "${FILE_COUNT}" -eq 0 ]; then
-            echo "::error::Payload files array is empty — nothing to review."
-            cat /tmp/review_payload.json
+          echo "Gate:     ${GATE:-unknown}"
+          echo "Issues:   ${ISSUES:-0}"
+          echo "Critical: ${CRIT:-0}"
+
+          if [ "${GATE}" != "pass" ]; then
+            echo "::error::AI Code Review gate FAILED (${ISSUES} issue(s), ${CRIT} critical). Fix the reported issues before merging."
             exit 1
           fi
-
-      # ── Step 6: Code complexity analysis ─────────────────────────────────
-      - name: Code complexity analysis
-        id: complexity
-        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
-        continue-on-error: true
-        env:
-          API_URL: ${{ secrets.AI_AGENT_API_URL }}
-          API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
-        run: |
-          EMPTY='{"gate_status":"pass","status":"success","total_issues":0,"severity_breakdown":{"critical":0,"high":0,"medium":0,"low":0,"info":0},"validation_failures":[],"llm_findings":[],"per_file_results":[],"token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"cost_usd":0,"latency_ms":0}'
-
-          jq '. + {"analysis_type": "complexity"}' /tmp/review_payload.json > /tmp/payload_complexity.json
-          MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
-
-          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "Complexity analysis — attempt ${ATTEMPT}/${MAX_RETRIES}"
-            HTTP_STATUS=$(curl -s --http1.0 --max-time 300 --retry 0 \
-              -o /tmp/response_complexity.json -w "%{http_code}" \
-              -X POST "${API_URL}/api/review/pr" \
-              -H "Content-Type: application/json" \
-              -H "x-api-key: ${API_KEY}" \
-              -d @/tmp/payload_complexity.json)
-            echo "HTTP status: ${HTTP_STATUS}"
-            if [ "$HTTP_STATUS" = "200" ]; then
-              SUCCESS=true; break
-            elif [ "$HTTP_STATUS" = "429" ] || [ "$HTTP_STATUS" -ge "500" ] 2>/dev/null; then
-              echo "Transient error (HTTP ${HTTP_STATUS}). Retrying in ${RETRY_DELAY}s..."
-              sleep "$RETRY_DELAY"; RETRY_DELAY=$((RETRY_DELAY * 2))
-            else
-              echo "::error::Complexity analysis failed: HTTP ${HTTP_STATUS} — $(cat /tmp/response_complexity.json 2>/dev/null)"
-              echo "$EMPTY" > /tmp/response_complexity.json
-              exit 1
-            fi
-          done
-
-          if [ "$SUCCESS" != "true" ]; then
-            echo "::error::Complexity analysis failed after ${MAX_RETRIES} attempts."
-            echo "$EMPTY" > /tmp/response_complexity.json
-            exit 1
-          fi
-          echo "Complexity analysis complete."
-          jq '{total_issues: .total_issues, severity: .severity_breakdown}' /tmp/response_complexity.json 2>/dev/null || true
-
-      # ── Step 7: AI security scan ──────────────────────────────────────────
-      - name: AI security scan
-        id: security
-        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
-        continue-on-error: true
-        env:
-          API_URL: ${{ secrets.AI_AGENT_API_URL }}
-          API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
-        run: |
-          EMPTY='{"gate_status":"pass","status":"success","total_issues":0,"severity_breakdown":{"critical":0,"high":0,"medium":0,"low":0,"info":0},"validation_failures":[],"llm_findings":[],"per_file_results":[],"token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"cost_usd":0,"latency_ms":0}'
-
-          jq '. + {"analysis_type": "security"}' /tmp/review_payload.json > /tmp/payload_security.json
-          MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
-
-          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "Security scan — attempt ${ATTEMPT}/${MAX_RETRIES}"
-            HTTP_STATUS=$(curl -s --http1.0 --max-time 300 --retry 0 \
-              -o /tmp/response_security.json -w "%{http_code}" \
-              -X POST "${API_URL}/api/review/pr" \
-              -H "Content-Type: application/json" \
-              -H "x-api-key: ${API_KEY}" \
-              -d @/tmp/payload_security.json)
-            echo "HTTP status: ${HTTP_STATUS}"
-            if [ "$HTTP_STATUS" = "200" ]; then
-              SUCCESS=true; break
-            elif [ "$HTTP_STATUS" = "429" ] || [ "$HTTP_STATUS" -ge "500" ] 2>/dev/null; then
-              echo "Transient error (HTTP ${HTTP_STATUS}). Retrying in ${RETRY_DELAY}s..."
-              sleep "$RETRY_DELAY"; RETRY_DELAY=$((RETRY_DELAY * 2))
-            else
-              echo "::error::Security scan failed: HTTP ${HTTP_STATUS} — $(cat /tmp/response_security.json 2>/dev/null)"
-              echo "$EMPTY" > /tmp/response_security.json
-              exit 1
-            fi
-          done
-
-          if [ "$SUCCESS" != "true" ]; then
-            echo "::error::Security scan failed after ${MAX_RETRIES} attempts."
-            echo "$EMPTY" > /tmp/response_security.json
-            exit 1
-          fi
-          echo "Security scan complete."
-          jq '{total_issues: .total_issues, severity: .severity_breakdown}' /tmp/response_security.json 2>/dev/null || true
-
-      # ── Step 8: AI code review ────────────────────────────────────────────
-      - name: AI code review
-        id: review
-        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
-        continue-on-error: true
-        env:
-          API_URL: ${{ secrets.AI_AGENT_API_URL }}
-          API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
-        run: |
-          EMPTY='{"gate_status":"pass","status":"success","total_issues":0,"severity_breakdown":{"critical":0,"high":0,"medium":0,"low":0,"info":0},"validation_failures":[],"llm_findings":[],"per_file_results":[],"token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"cost_usd":0,"latency_ms":0}'
-
-          jq '. + {"analysis_type": "review"}' /tmp/review_payload.json > /tmp/payload_review.json
-          MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
-
-          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "Code review — attempt ${ATTEMPT}/${MAX_RETRIES}"
-            HTTP_STATUS=$(curl -s --http1.0 --max-time 300 --retry 0 \
-              -o /tmp/response_review.json -w "%{http_code}" \
-              -X POST "${API_URL}/api/review/pr" \
-              -H "Content-Type: application/json" \
-              -H "x-api-key: ${API_KEY}" \
-              -d @/tmp/payload_review.json)
-            echo "HTTP status: ${HTTP_STATUS}"
-            if [ "$HTTP_STATUS" = "200" ]; then
-              SUCCESS=true; break
-            elif [ "$HTTP_STATUS" = "429" ] || [ "$HTTP_STATUS" -ge "500" ] 2>/dev/null; then
-              echo "Transient error (HTTP ${HTTP_STATUS}). Retrying in ${RETRY_DELAY}s..."
-              sleep "$RETRY_DELAY"; RETRY_DELAY=$((RETRY_DELAY * 2))
-            else
-              echo "::error::Code review failed: HTTP ${HTTP_STATUS} — $(cat /tmp/response_review.json 2>/dev/null)"
-              echo "$EMPTY" > /tmp/response_review.json
-              exit 1
-            fi
-          done
-
-          if [ "$SUCCESS" != "true" ]; then
-            echo "::error::Code review failed after ${MAX_RETRIES} attempts."
-            echo "$EMPTY" > /tmp/response_review.json
-            exit 1
-          fi
-          echo "Code review complete."
-          jq '{total_issues: .total_issues, severity: .severity_breakdown}' /tmp/response_review.json 2>/dev/null || true
-
-      # ── Step 9: AI code quality analysis ─────────────────────────────────
-      - name: AI code quality analysis
-        id: quality_scan
-        if: steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
-        continue-on-error: true
-        env:
-          API_URL: ${{ secrets.AI_AGENT_API_URL }}
-          API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
-        run: |
-          EMPTY='{"gate_status":"pass","status":"success","total_issues":0,"severity_breakdown":{"critical":0,"high":0,"medium":0,"low":0,"info":0},"validation_failures":[],"llm_findings":[],"per_file_results":[],"token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0},"cost_usd":0,"latency_ms":0}'
-
-          jq '. + {"analysis_type": "quality"}' /tmp/review_payload.json > /tmp/payload_quality.json
-          MAX_RETRIES=3; RETRY_DELAY=10; ATTEMPT=0; SUCCESS=false
-
-          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "Quality analysis — attempt ${ATTEMPT}/${MAX_RETRIES}"
-            HTTP_STATUS=$(curl -s --http1.0 --max-time 300 --retry 0 \
-              -o /tmp/response_quality.json -w "%{http_code}" \
-              -X POST "${API_URL}/api/review/pr" \
-              -H "Content-Type: application/json" \
-              -H "x-api-key: ${API_KEY}" \
-              -d @/tmp/payload_quality.json)
-            echo "HTTP status: ${HTTP_STATUS}"
-            if [ "$HTTP_STATUS" = "200" ]; then
-              SUCCESS=true; break
-            elif [ "$HTTP_STATUS" = "429" ] || [ "$HTTP_STATUS" -ge "500" ] 2>/dev/null; then
-              echo "Transient error (HTTP ${HTTP_STATUS}). Retrying in ${RETRY_DELAY}s..."
-              sleep "$RETRY_DELAY"; RETRY_DELAY=$((RETRY_DELAY * 2))
-            else
-              echo "::error::Quality analysis failed: HTTP ${HTTP_STATUS} — $(cat /tmp/response_quality.json 2>/dev/null)"
-              echo "$EMPTY" > /tmp/response_quality.json
-              exit 1
-            fi
-          done
-
-          if [ "$SUCCESS" != "true" ]; then
-            echo "::error::Quality analysis failed after ${MAX_RETRIES} attempts."
-            echo "$EMPTY" > /tmp/response_quality.json
-            exit 1
-          fi
-          echo "Quality analysis complete."
-          jq '{total_issues: .total_issues, severity: .severity_breakdown}' /tmp/response_quality.json 2>/dev/null || true
-
-      # ── Step 10: Aggregate all analysis results ───────────────────────────
-      - name: Aggregate analysis results
-        id: aggregate
-        if: always() && steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
-        run: |
-          python3 << 'PYEOF'
-          import json, os, sys
-
-          responses = {
-            'complexity': '/tmp/response_complexity.json',
-            'security':   '/tmp/response_security.json',
-            'review':     '/tmp/response_review.json',
-            'quality':    '/tmp/response_quality.json',
-          }
-
-          all_validation_failures = []
-          all_llm_findings        = []
-          all_per_file_results    = []
-          severity_totals = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0}
-          total_issues        = 0
-          total_input_tokens  = 0
-          total_output_tokens = 0
-          total_cost_usd      = 0.0
-          total_latency_ms    = 0
-          gate_fail           = False
-          run_id              = ''
-          model               = ''
-          files_reviewed      = 0
-          timestamp           = ''
-          per_analysis        = {}
-
-          for analysis_type, path in responses.items():
-            if not os.path.isfile(path):
-              print(f"Warning: missing response file {path}", file=sys.stderr)
-              per_analysis[analysis_type] = {}
-              continue
-            with open(path) as f:
-              r = json.load(f)
-            per_analysis[analysis_type] = r
-
-            vf = r.get('validation_failures', [])
-            for item in vf:
-              item['analysis_type'] = analysis_type
-            all_validation_failures.extend(vf)
-
-            lf = r.get('llm_findings', [])
-            for item in lf:
-              item['analysis_type'] = analysis_type
-            all_llm_findings.extend(lf)
-
-            all_per_file_results.extend(r.get('per_file_results', []))
-
-            sb = r.get('severity_breakdown', {})
-            for sev in severity_totals:
-              severity_totals[sev] += int(sb.get(sev, 0))
-
-            total_issues        += int(r.get('total_issues', 0))
-            tu = r.get('token_usage', {})
-            total_input_tokens  += int(tu.get('input_tokens', 0))
-            total_output_tokens += int(tu.get('output_tokens', 0))
-            total_cost_usd      += float(r.get('cost_usd', 0))
-            total_latency_ms    += int(r.get('latency_ms', 0))
-
-            if r.get('gate_status') == 'fail':
-              gate_fail = True
-            if not run_id and r.get('run_id'):
-              run_id = r['run_id']
-            if not model and r.get('model'):
-              model = r['model']
-            if not files_reviewed and r.get('files_reviewed'):
-              files_reviewed = r['files_reviewed']
-            if not timestamp and r.get('timestamp'):
-              timestamp = r['timestamp']
-
-          aggregated = {
-            'run_id':              run_id,
-            'gate_status':         'fail' if gate_fail else 'pass',
-            'status':              'failure' if gate_fail else 'success',
-            'total_issues':        total_issues,
-            'severity_breakdown':  severity_totals,
-            'validation_failures': all_validation_failures,
-            'llm_findings':        all_llm_findings,
-            'per_file_results':    all_per_file_results,
-            'token_usage': {
-              'input_tokens':  total_input_tokens,
-              'output_tokens': total_output_tokens,
-              'total_tokens':  total_input_tokens + total_output_tokens,
-            },
-            'cost_usd':       total_cost_usd,
-            'latency_ms':     total_latency_ms,
-            'model':          model,
-            'files_reviewed': files_reviewed,
-            'timestamp':      timestamp,
-            'per_analysis':   per_analysis,
-          }
-
-          with open('/tmp/review_response.json', 'w') as f:
-            json.dump(aggregated, f)
-
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as gf:
-            gf.write(f"gate_status={'fail' if gate_fail else 'pass'}\n")
-            gf.write(f"status={'failure' if gate_fail else 'success'}\n")
-            gf.write(f"total_issues={total_issues}\n")
-            gf.write(f"critical={severity_totals['critical']}\n")
-            gf.write(f"high={severity_totals['high']}\n")
-            gf.write(f"validation_failures={len(all_validation_failures)}\n")
-
-          print(
-            f"Aggregation complete: {total_issues} total issues, "
-            f"{severity_totals['critical']} critical, "
-            f"{len(all_validation_failures)} validation failures, "
-            f"gate={'FAIL' if gate_fail else 'PASS'}",
-            file=sys.stderr
-          )
-          PYEOF
-
-      # ── Step 11: Post structured PR comment ───────────────────────────────
-      - name: Post PR review comment
-        if: always() && steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
-        uses: actions/github-script@v7
-        env:
-          AI_AGENT_API_URL: ${{ secrets.AI_AGENT_API_URL }}
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const fs = require('fs');
-
-            const responseFile = '/tmp/review_response.json';
-            if (!fs.existsSync(responseFile)) {
-              console.log('No review response file — skipping PR comment.');
-              return;
-            }
-
-            const r = JSON.parse(fs.readFileSync(responseFile, 'utf8'));
-            const gatePass  = r.gate_status === 'pass';
-            const gateEmoji = gatePass ? '✅' : '❌';
-            const gateLabel = gatePass ? 'PASSED' : 'FAILED';
-
-            const pr      = context.payload.pull_request;
-            const headSha = pr.head.sha.slice(0, 8);
-            const sb      = r.severity_breakdown || {};
-            const tu      = r.token_usage || {};
-            const pa      = r.per_analysis || {};
-
-            let body = `## ${gateEmoji} AI Code Review Gate — ${gateLabel}\n\n`;
-            body += `| Field | Value |\n|---|---|\n`;
-            body += `| Repository | \`${context.repo.owner}/${context.repo.repo}\` |\n`;
-            body += `| Branch | \`${pr.head.ref}\` |\n`;
-            body += `| Commit | \`${headSha}\` |\n`;
-            body += `| Files Reviewed | ${r.files_reviewed} |\n`;
-            body += `| Total Run Time | ${((r.latency_ms || 0) / 1000).toFixed(1)}s |\n`;
-            body += `| Run ID | \`${r.run_id}\` |\n\n`;
-
-            body += `### Severity Breakdown (All Stages)\n\n`;
-            body += `| 🔴 Critical | 🟠 High | 🟡 Medium | 🔵 Low | ⚪ Info |\n`;
-            body += `|:---:|:---:|:---:|:---:|:---:|\n`;
-            body += `| ${sb.critical||0} | ${sb.high||0} | ${sb.medium||0} | ${sb.low||0} | ${sb.info||0} |\n\n`;
-
-            const stages = [
-              { key: 'complexity', label: '🔍 Code Complexity Analysis' },
-              { key: 'security',   label: '🔒 AI Security Scan'         },
-              { key: 'review',     label: '🤖 AI Code Review'           },
-              { key: 'quality',    label: '📐 AI Code Quality Analysis' },
-            ];
-
-            body += `### Stage Results Summary\n\n`;
-            body += `| Stage | Issues | Critical | High | Validation Failures |\n`;
-            body += `|---|:---:|:---:|:---:|:---:|\n`;
-            for (const s of stages) {
-              const sr  = pa[s.key] || {};
-              const ssb = sr.severity_breakdown || {};
-              const vfc = (sr.validation_failures || []).length;
-              body += `| ${s.label} | ${sr.total_issues||0} | ${ssb.critical||0} | ${ssb.high||0} | ${vfc} |\n`;
-            }
-            body += `\n`;
-
-            for (const s of stages) {
-              const sr  = pa[s.key] || {};
-              const vf  = sr.validation_failures || [];
-              const lf  = sr.llm_findings || [];
-              const critHighLLM = lf.filter(f => f.severity === 'critical' || f.severity === 'high');
-              const medLowLLM   = lf.filter(f => ['medium', 'low', 'info'].includes(f.severity));
-              if (vf.length === 0 && lf.length === 0) continue;
-
-              body += `<details>\n<summary>${s.label} — ${sr.total_issues||0} issue(s)</summary>\n\n`;
-
-              if (vf.length > 0) {
-                body += `#### ❌ Validation Failures (${vf.length})\n\n`;
-                for (const f of vf.slice(0, 15)) {
-                  const sev = (f.severity || 'unknown').toUpperCase();
-                  const loc = f.line_number ? ` (line ${f.line_number})` : '';
-                  body += `- **[${sev}]** \`${f.file}${loc}\`\n`;
-                  body += `  **${f.message}**\n`;
-                  body += `  > 💡 ${f.suggestion}\n\n`;
-                }
-                if (vf.length > 15) body += `_...and ${vf.length - 15} more._\n\n`;
-              }
-
-              if (critHighLLM.length > 0) {
-                body += `#### 🚨 Critical & High Findings (${critHighLLM.length})\n\n`;
-                for (const f of critHighLLM.slice(0, 10)) {
-                  const sev = (f.severity || 'unknown').toUpperCase();
-                  const loc = f.line_number ? ` (line ${f.line_number})` : '';
-                  body += `- **[${sev}]** \`${f.file}${loc}\` — ${f.category}\n`;
-                  body += `  **${f.message}**\n`;
-                  if (f.suggestion) body += `  > 💡 ${f.suggestion}\n`;
-                  if (f.reasoning)  body += `  > 🔍 ${f.reasoning}\n`;
-                  body += `\n`;
-                }
-              }
-
-              if (medLowLLM.length > 0) {
-                body += `#### ⚠️ Medium & Lower Findings (${medLowLLM.length})\n\n`;
-                for (const f of medLowLLM.slice(0, 10)) {
-                  const sev = (f.severity || 'unknown').toUpperCase();
-                  const loc = f.line_number ? ` (line ${f.line_number})` : '';
-                  body += `- **[${sev}]** \`${f.file}${loc}\` — ${f.message}\n`;
-                  if (f.suggestion) body += `  > 💡 ${f.suggestion}\n`;
-                  body += `\n`;
-                }
-                if (medLowLLM.length > 10) body += `_...and ${medLowLLM.length - 10} more._\n\n`;
-              }
-
-              body += `</details>\n\n`;
-            }
-
-            const allVf = r.validation_failures || [];
-            if (allVf.length > 0) {
-              body += `### ❌ Validation Rule Violations (${allVf.length}) — **Blocking**\n\n`;
-              body += `> These violations are deterministic rule failures that block merge.\n\n`;
-              for (const f of allVf.slice(0, 25)) {
-                const sev   = (f.severity || 'unknown').toUpperCase();
-                const loc   = f.line_number ? ` (line ${f.line_number})` : '';
-                const stage = f.analysis_type ? ` [${f.analysis_type}]` : '';
-                body += `- **[${sev}]**${stage} \`${f.file}${loc}\`\n`;
-                body += `  **${f.message}**\n`;
-                body += `  > 💡 ${f.suggestion}\n\n`;
-              }
-              if (allVf.length > 25) {
-                body += `_...and ${allVf.length - 25} more violations. Fix all before merging._\n\n`;
-              }
-            } else {
-              body += `### ✅ Validation Rules — All Passed\n\n`;
-            }
-
-            const llm         = r.llm_findings || [];
-            const critHighLLM = llm.filter(f => f.severity === 'critical' || f.severity === 'high');
-            if (critHighLLM.length > 0) {
-              body += `### 🤖 AI Findings — Critical & High (${critHighLLM.length})\n\n`;
-              for (const f of critHighLLM.slice(0, 15)) {
-                const sev   = (f.severity || 'unknown').toUpperCase();
-                const loc   = f.line_number ? ` (line ${f.line_number})` : '';
-                const stage = f.analysis_type ? ` [${f.analysis_type}]` : '';
-                body += `- **[${sev}]**${stage} \`${f.file}${loc}\` — ${f.category}\n`;
-                body += `  **${f.message}**\n`;
-                if (f.suggestion) body += `  > 💡 ${f.suggestion}\n`;
-                if (f.reasoning)  body += `  > 🔍 ${f.reasoning}\n`;
-                body += `\n`;
-              }
-            }
-
-            const medLowLLM = llm.filter(f => ['medium', 'low', 'info'].includes(f.severity));
-            if (medLowLLM.length > 0) {
-              body += `<details>\n<summary>🤖 AI Findings — Medium & Lower (${medLowLLM.length})</summary>\n\n`;
-              for (const f of medLowLLM.slice(0, 30)) {
-                const sev   = (f.severity || 'unknown').toUpperCase();
-                const loc   = f.line_number ? ` (line ${f.line_number})` : '';
-                const stage = f.analysis_type ? ` [${f.analysis_type}]` : '';
-                body += `- **[${sev}]**${stage} \`${f.file}${loc}\` — ${f.message}\n`;
-                if (f.suggestion) body += `  > 💡 ${f.suggestion}\n`;
-                body += `\n`;
-              }
-              body += `</details>\n\n`;
-            }
-
-            if (llm.length === 0 && allVf.length === 0) {
-              body += `### 🤖 AI Analysis — No Issues Found\n\n`;
-              body += `The AI reviewer found no issues in the changed files. Great work!\n\n`;
-            }
-
-            const pfr = r.per_file_results || [];
-            if (pfr.length > 0) {
-              body += `<details>\n<summary>📁 Per-File Results (${pfr.length} files)</summary>\n\n`;
-              body += `| File | Language | Validation | LLM | Errors |\n`;
-              body += `|---|---|:---:|:---:|:---:|\n`;
-              for (const f of pfr) {
-                const errIcon = f.error ? '⚠️' : '';
-                body += `| \`${f.file}\` | ${f.language} | ${f.validation_count} | ${f.llm_count} | ${errIcon} |\n`;
-              }
-              body += `\n</details>\n\n`;
-            }
-
-            body += `### 📊 Token Usage & Cost (All Stages)\n\n`;
-            body += `| Metric | Value |\n|---|---|\n`;
-            body += `| Input Tokens | ${(tu.input_tokens||0).toLocaleString()} |\n`;
-            body += `| Output Tokens | ${(tu.output_tokens||0).toLocaleString()} |\n`;
-            body += `| Total Tokens | ${(tu.total_tokens||0).toLocaleString()} |\n`;
-            body += `| Model | \`${r.model||'unknown'}\` |\n`;
-            body += `| Total Cost | \`$${(r.cost_usd||0).toFixed(4)}\` |\n\n`;
-
-            body += `---\n`;
-            body += `*🤖 Powered by [AI Code Review Assistant](${process.env.AI_AGENT_API_URL}) `;
-            body += `| Run \`${r.run_id}\` | ${new Date().toUTCString()}*\n`;
-
-            await github.rest.issues.createComment({
-              owner:        context.repo.owner,
-              repo:         context.repo.repo,
-              issue_number: pr.number,
-              body,
-            });
-
-      # ── Step 12: Emit summary metrics to observability backend ────────────
-      - name: Report summary metrics
-        if: always() && steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
-        env:
-          API_URL: ${{ secrets.AI_AGENT_API_URL }}
-          API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
-          REPO: ${{ github.repository }}
-          PROJECT_ID: ${{ github.event.repository.name }}
-          WORKFLOW_RUN_ID: ${{ github.run_id }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BRANCH: ${{ github.head_ref }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          if [ ! -f /tmp/review_response.json ]; then
-            echo "No review response — skipping metrics."
-            exit 0
-          fi
-
-          R=$(cat /tmp/review_response.json)
-
-          METRIC_PAYLOAD=$(jq -n \
-            --arg  repo          "$REPO" \
-            --arg  project_id    "$PROJECT_ID" \
-            --arg  run_id        "$WORKFLOW_RUN_ID" \
-            --argjson pr_number  "${PR_NUMBER:-0}" \
-            --arg  branch        "$BRANCH" \
-            --arg  actor         "$ACTOR" \
-            --argjson response   "$R" \
-            '{
-              repository:      $repo,
-              project_id:      $project_id,
-              workflow_run_id: $run_id,
-              pr_number:       $pr_number,
-              branch:          $branch,
-              triggered_by:    $actor,
-              source:          "pipeline",
-              status:          $response.status,
-              files_reviewed:  ($response.files_reviewed // 0),
-              issues_found:    ($response.total_issues // 0),
-              critical_count:  ($response.severity_breakdown.critical // 0),
-              high_count:      ($response.severity_breakdown.high // 0),
-              input_tokens:    ($response.token_usage.input_tokens // 0),
-              output_tokens:   ($response.token_usage.output_tokens // 0),
-              total_tokens:    ($response.token_usage.total_tokens // 0),
-              latency_ms:      ($response.latency_ms // 0),
-              model:           ($response.model // ""),
-              cost_usd:        ($response.cost_usd // 0)
-            }')
-
-          curl -s -o /dev/null -w "Metrics ingest: HTTP %{http_code}\n" \
-            --max-time 30 \
-            -X POST "${API_URL}/api/metrics/ingest" \
-            -H "Content-Type: application/json" \
-            -H "x-api-key: ${API_KEY}" \
-            -d "$METRIC_PAYLOAD" || echo "Warning: summary metrics ingest failed (non-blocking)"
-
-      # ── Step 13: Emit full drill-down detail to observability backend ──────
-      - name: Report drill-down detail
-        if: always() && steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
-        env:
-          API_URL: ${{ secrets.AI_AGENT_API_URL }}
-          API_KEY: ${{ secrets.AI_AGENT_API_KEY }}
-          REPO: ${{ github.repository }}
-          PROJECT_ID: ${{ github.event.repository.name }}
-          WORKFLOW_RUN_ID: ${{ github.run_id }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          COMMIT_SHA: ${{ github.sha }}
-          BRANCH: ${{ github.head_ref }}
-          BASE_BRANCH: ${{ github.base_ref }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          if [ ! -f /tmp/review_response.json ]; then
-            echo "No review response — skipping drill-down detail."
-            exit 0
-          fi
-
-          R=$(cat /tmp/review_response.json)
-
-          DETAIL_PAYLOAD=$(jq -n \
-            --arg  repo          "$REPO" \
-            --arg  project_id    "$PROJECT_ID" \
-            --arg  run_id        "$WORKFLOW_RUN_ID" \
-            --argjson pr_number  "${PR_NUMBER:-0}" \
-            --arg  commit_sha    "$COMMIT_SHA" \
-            --arg  branch        "$BRANCH" \
-            --arg  base_branch   "$BASE_BRANCH" \
-            --arg  actor         "$ACTOR" \
-            --argjson response   "$R" \
-            '{
-              run_id:               $response.run_id,
-              repository:           $repo,
-              project_id:           $project_id,
-              workflow_run_id:      $run_id,
-              pr_number:            $pr_number,
-              commit_sha:           $commit_sha,
-              branch:               $branch,
-              base_branch:          $base_branch,
-              actor:                $actor,
-              source:               "pipeline",
-              gate_status:          ($response.gate_status // "pass"),
-              status:               ($response.status // "success"),
-              validation_failures:  ($response.validation_failures // []),
-              llm_findings:         ($response.llm_findings // []),
-              per_file_results:     ($response.per_file_results // []),
-              severity_distribution: ($response.severity_breakdown // {}),
-              total_issues:         ($response.total_issues // 0),
-              critical_count:       ($response.severity_breakdown.critical // 0),
-              high_count:           ($response.severity_breakdown.high // 0),
-              medium_count:         ($response.severity_breakdown.medium // 0),
-              low_count:            ($response.severity_breakdown.low // 0),
-              files_reviewed:       ($response.files_reviewed // 0),
-              input_tokens:         ($response.token_usage.input_tokens // 0),
-              output_tokens:        ($response.token_usage.output_tokens // 0),
-              total_tokens:         ($response.token_usage.total_tokens // 0),
-              cost_usd:             ($response.cost_usd // 0),
-              model:                ($response.model // ""),
-              latency_ms:           ($response.latency_ms // 0),
-              timestamp:            ($response.timestamp // ""),
-              runtime_ms:           ($response.latency_ms // 0)
-            }')
-
-          curl -s -o /dev/null -w "Drill-down detail: HTTP %{http_code}\n" \
-            --max-time 30 \
-            -X POST "${API_URL}/api/metrics/runs" \
-            -H "Content-Type: application/json" \
-            -H "x-api-key: ${API_KEY}" \
-            -d "$DETAIL_PAYLOAD" || echo "Warning: drill-down detail storage failed (non-blocking)"
-
-      # ── Step 14: Quality gate — enforce standards (final step) ────────────
-      - name: Quality gate — enforce standards
-        if: always() && steps.diff.outputs.no_files == 'false' && steps.payload.outputs.no_files != 'true'
-        env:
-          GATE_STATUS:      ${{ steps.aggregate.outputs.gate_status }}
-          CRITICAL:         ${{ steps.aggregate.outputs.critical }}
-          VAL_FAILURES:     ${{ steps.aggregate.outputs.validation_failures }}
-          COMPLEXITY_RESULT: ${{ steps.complexity.outcome }}
-          SECURITY_RESULT:   ${{ steps.security.outcome }}
-          REVIEW_RESULT:     ${{ steps.review.outcome }}
-          QUALITY_RESULT:    ${{ steps.quality_scan.outcome }}
-        run: |
-          echo "Analysis outcomes: complexity=${COMPLEXITY_RESULT} security=${SECURITY_RESULT} review=${REVIEW_RESULT} quality=${QUALITY_RESULT}"
-
-          if [ "$COMPLEXITY_RESULT" = "failure" ] || [ "$SECURITY_RESULT" = "failure" ] || \
-             [ "$REVIEW_RESULT" = "failure" ]     || [ "$QUALITY_RESULT" = "failure" ]; then
-            echo "::error::One or more analysis stages failed to complete. Check the logs above for details."
-            echo "::error::Ensure the EC2 backend is running the latest code and is reachable at the configured AI_AGENT_API_URL."
-            exit 1
-          fi
-
-          if [ "$GATE_STATUS" = "fail" ]; then
-            echo "::error title=AI Code Review Gate FAILED::Found ${CRITICAL} critical issue(s) and ${VAL_FAILURES} validation failure(s)."
-            echo "::error::Review the PR comment for a full breakdown. Fix all blocking issues before merging."
-            exit 1
-          fi
-
-          echo "✅ AI Code Review Gate PASSED — no blocking issues found."
+          echo "AI Code Review gate PASSED."
