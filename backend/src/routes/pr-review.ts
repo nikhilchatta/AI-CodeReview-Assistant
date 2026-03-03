@@ -19,6 +19,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { runPatternRules, mergeIssues } from '../engine/pattern-rules.js';
 import { calculateCost } from '../db/pricing.js';
 import { getAIPlatformConfig, callAIPlatform } from './ai-platform.js';
+import { insertTrainingRecord } from '../db/training.js';
 import type {
   ValidationFailure,
   LLMFinding,
@@ -152,6 +153,7 @@ export function createPRReviewRouter(): Router {
       let totalOutputTokens = 0;
       let resolvedModel = aiModel || 'claude-sonnet-4-20250514';
       let hasError = false;
+      let lastRenderedPrompt: string | null = null; // captured for training record
 
       for (const file of files) {
         if (!file.path || !file.content || !file.language) continue;
@@ -170,6 +172,7 @@ export function createPRReviewRouter(): Router {
             const platformConfig = getAIPlatformConfig(req);
             if (platformConfig) {
               const prompt = buildReviewPrompt(file.content, file.language, file.path, analysisType);
+              lastRenderedPrompt = prompt;
               const result = await callAIPlatform(
                 platformConfig,
                 aiModel || 'gpt-4',
@@ -182,6 +185,7 @@ export function createPRReviewRouter(): Router {
             }
           } else if (claude) {
             const prompt = buildReviewPrompt(file.content, file.language, file.path, analysisType);
+            lastRenderedPrompt = prompt;
             const response = await claude.messages.create({
               model: 'claude-sonnet-4-20250514',
               max_tokens: 8192,
@@ -320,6 +324,45 @@ export function createPRReviewRouter(): Router {
         `tokens=${totalInputTokens + totalOutputTokens}, cost=$${costUsd.toFixed(6)}, ` +
         `latency=${latencyMs}ms`,
       );
+
+      // ── Write training record (fire-and-forget — must not delay response) ──
+      setImmediate(() => {
+        insertTrainingRecord({
+          run_id:                  runId,
+          schema_version:          '1.0',
+          created_at:              response.timestamp,
+          repository:              metadata.repository,
+          commit_sha:              metadata.commit_sha,
+          pr_number:               metadata.pr_number,
+          branch:                  metadata.branch,
+          base_branch:             metadata.base_branch,
+          actor:                   metadata.actor,
+          workflow_run_id:         metadata.workflow_run_id,
+          project_id:              metadata.project_id,
+          full_diff:               (body as any).full_diff ?? undefined,
+          files_reviewed_json:     JSON.stringify(files.map(f => ({ path: f.path, language: f.language }))),
+          rendered_prompt:         lastRenderedPrompt ?? undefined,
+          prompt_template_version: '1.0',
+          validation_rules_config: JSON.stringify({ analysis_type: analysisType }),
+          model_version:           resolvedModel,
+          analysis_type:           analysisType,
+          validation_failures:     JSON.stringify(allValidationFailures),
+          llm_findings:            JSON.stringify(allLLMFindings),
+          per_file_results:        JSON.stringify(perFileResults),
+          severity_breakdown:      JSON.stringify(severityBreakdown),
+          gate_status:             gateStatus,
+          status,
+          total_issues:            totalIssues,
+          input_tokens:            totalInputTokens,
+          output_tokens:           totalOutputTokens,
+          total_tokens:            totalInputTokens + totalOutputTokens,
+          cost_usd:                costUsd,
+          latency_ms:              latencyMs,
+          source:                  'pipeline',
+        }).catch((err: Error) =>
+          console.error(`[PR-REVIEW] Training record write failed for ${runId}:`, err.message),
+        );
+      });
 
       return res.json(response);
     } catch (error: any) {

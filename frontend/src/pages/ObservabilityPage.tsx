@@ -30,6 +30,9 @@ import {
   AccordionSummary,
   AccordionDetails,
   Badge,
+  Button,
+  ButtonGroup,
+  Snackbar,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import InsightsIcon from '@mui/icons-material/Insights';
@@ -47,12 +50,15 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import PsychologyIcon from '@mui/icons-material/Psychology';
 import ArticleIcon from '@mui/icons-material/Article';
+import ThumbUpIcon from '@mui/icons-material/ThumbUp';
+import ThumbDownIcon from '@mui/icons-material/ThumbDown';
 import type { MetricsSummary } from '../types';
 import {
   fetchMetricsSummary,
   fetchMetricsProjects,
   fetchRunDetails,
   fetchRunDetail,
+  submitFeedback,
 } from '../services/api';
 
 // ── Local types for run-details (drill-down) ──
@@ -267,6 +273,83 @@ function TokenBar({ input, output }: { input: number; output: number }) {
   );
 }
 
+// ── Feedback Buttons ──
+// Renders Accept / Reject buttons for a single finding or the gate decision.
+// Submits to POST /api/training/feedback and shows a brief confirmation snack.
+
+function FeedbackButtons({
+  runId,
+  findingIndex,
+  findingType,
+  onFeedback,
+}: {
+  runId: string;
+  findingIndex?: number;
+  findingType: 'validation' | 'llm' | 'gate';
+  onFeedback: (msg: string) => void;
+}) {
+  const [submitted, setSubmitted] = useState<'accept' | 'reject' | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const send = async (action: 'accept' | 'reject') => {
+    if (busy || submitted) return;
+    setBusy(true);
+    try {
+      await submitFeedback({
+        run_id:          runId,
+        action,
+        finding_index:   findingIndex,
+        finding_type:    findingType,
+        feedback_channel: 'dashboard',
+      });
+      setSubmitted(action);
+      onFeedback(action === 'accept' ? 'Marked as correct' : 'Marked as false positive');
+    } catch {
+      onFeedback('Feedback failed — please try again');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (submitted) {
+    return (
+      <Chip
+        size="small"
+        label={submitted === 'accept' ? '✓ Accepted' : '✗ Rejected'}
+        sx={{
+          height: 20,
+          fontSize: '0.65rem',
+          bgcolor: submitted === 'accept' ? '#22C55E18' : '#EF444418',
+          color:   submitted === 'accept' ? '#22C55E'   : '#EF4444',
+          border:  1,
+          borderColor: submitted === 'accept' ? '#22C55E44' : '#EF444444',
+        }}
+      />
+    );
+  }
+
+  return (
+    <ButtonGroup size="small" variant="outlined" disabled={busy}>
+      <Tooltip title="Accept — finding is correct">
+        <Button
+          onClick={() => send('accept')}
+          sx={{ minWidth: 28, px: 0.75, height: 20, fontSize: '0.65rem', color: '#22C55E', borderColor: '#22C55E44', '&:hover': { bgcolor: '#22C55E18', borderColor: '#22C55E' } }}
+        >
+          <ThumbUpIcon sx={{ fontSize: 11, mr: 0.25 }} /> Accept
+        </Button>
+      </Tooltip>
+      <Tooltip title="Reject — false positive">
+        <Button
+          onClick={() => send('reject')}
+          sx={{ minWidth: 28, px: 0.75, height: 20, fontSize: '0.65rem', color: '#EF4444', borderColor: '#EF444444', '&:hover': { bgcolor: '#EF444418', borderColor: '#EF4444' } }}
+        >
+          <ThumbDownIcon sx={{ fontSize: 11, mr: 0.25 }} /> Reject
+        </Button>
+      </Tooltip>
+    </ButtonGroup>
+  );
+}
+
 // ── Drill-Down Drawer ──
 
 function DrillDownDrawer({
@@ -281,6 +364,7 @@ function DrillDownDrawer({
   const [detail, setDetail] = useState<RunDetailFull | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [snack, setSnack] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open || !runId) return;
@@ -488,6 +572,14 @@ function DrillDownDrawer({
                           Suggestion: {vf.suggestion}
                         </Typography>
                       )}
+                      <Box sx={{ mt: 0.75 }}>
+                        <FeedbackButtons
+                          runId={detail.run_id}
+                          findingIndex={i}
+                          findingType="validation"
+                          onFeedback={setSnack}
+                        />
+                      </Box>
                     </Paper>
                   ))}
                 </Stack>
@@ -557,6 +649,14 @@ function DrillDownDrawer({
                             {f.codeSnippet}
                           </Box>
                         )}
+                        <Box sx={{ mt: 1 }}>
+                          <FeedbackButtons
+                            runId={detail.run_id}
+                            findingIndex={i}
+                            findingType="llm"
+                            onFeedback={setSnack}
+                          />
+                        </Box>
                       </AccordionDetails>
                     </Accordion>
                   ))}
@@ -647,9 +747,37 @@ function DrillDownDrawer({
                 </Stack>
               </Box>
             )}
+
+            {/* Gate-Level Feedback — pipeline runs only */}
+            {detail.source === 'pipeline' && (
+              <Paper elevation={0} sx={{ p: 2, border: 1, borderColor: 'divider' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                  <Typography variant="subtitle2" fontWeight={700}>
+                    Gate Decision
+                  </Typography>
+                  <GateChip gate={detail.gate_status} />
+                </Box>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                  Do you agree with the gate outcome for this run?
+                </Typography>
+                <FeedbackButtons
+                  runId={detail.run_id}
+                  findingType="gate"
+                  onFeedback={setSnack}
+                />
+              </Paper>
+            )}
           </Stack>
         )}
       </Box>
+
+      <Snackbar
+        open={snack !== null}
+        autoHideDuration={3000}
+        onClose={() => setSnack(null)}
+        message={snack}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      />
     </Drawer>
   );
 }

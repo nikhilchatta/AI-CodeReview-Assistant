@@ -86,3 +86,51 @@ export async function fetchMetricsProjects() {
   if (!response.ok) throw new Error(`Failed to fetch projects: ${response.status}`);
   return response.json();
 }
+
+// ── Training Data API ──
+
+export interface FeedbackPayload {
+  run_id: string;
+  action: 'accept' | 'reject' | 'modify';
+  finding_index?: number;
+  finding_type?: 'validation' | 'llm' | 'gate';
+  reason?: string;
+  corrected_findings?: object[];
+  reviewer_id?: string;
+  feedback_channel?: 'dashboard' | 'gh' | 'pr';
+}
+
+export async function submitFeedback(payload: FeedbackPayload) {
+  const response = await fetch(`${API_BASE}/training/feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error((err as any).error || `Feedback submit failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export interface TrainingExportParams {
+  format?: 'jsonl' | 'json';
+  labeled?: boolean;
+  model_version?: string;
+  repository?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function fetchTrainingExport(params: TrainingExportParams = {}) {
+  const qs = buildQueryString({
+    ...params,
+    labeled: params.labeled ? 'true' : undefined,
+  } as Record<string, string | number | undefined>);
+  const response = await fetch(`${API_BASE}/training/export${qs}`);
+  if (!response.ok) throw new Error(`Training export failed: ${response.status}`);
+  if (params.format === 'jsonl') return response.text();
+  return response.json();
+}

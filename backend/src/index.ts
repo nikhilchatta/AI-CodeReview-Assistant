@@ -7,6 +7,7 @@ import { createBatchReviewRouter } from './routes/batch-review.js';
 import { createMetricsRouter } from './routes/metrics.js';
 import { createPRReviewRouter } from './routes/pr-review.js';
 import { createRunDetailsRouter } from './routes/run-details.js';
+import { createTrainingRouter, createWebhookRouter } from './routes/training.js';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -85,6 +86,12 @@ app.use('/api', createMetricsRouter());
 
 // Run details drill-down routes
 app.use('/api', createRunDetailsRouter());
+
+// Training data routes — feedback submission and dataset export
+app.use('/api', createTrainingRouter());
+
+// GitHub webhook receiver — maps reactions and PR reviews to training feedback
+app.use('/api', createWebhookRouter());
 
 // Health check
 app.get('/api/health', (_req, res) => {
