@@ -537,6 +537,156 @@ export async function exportTrainingRecords(
   return records;
 }
 
+// ── Training Stats ─────────────────────────────────────────────────────────────
+
+export interface TrainingStats {
+  total_records: number;
+  labeled_records: number;
+  total_feedback: number;
+  feedback_by_channel: { dashboard: number; gh: number; pr: number };
+  feedback_by_action: { accept: number; reject: number; modify: number };
+  label_distribution: {
+    correct: number;
+    false_positive: number;
+    false_negative: number;
+    partial: number;
+  };
+  avg_precision: number | null;
+  avg_recall: number | null;
+  avg_rl_reward: number | null;
+}
+
+export async function getTrainingStats(): Promise<TrainingStats> {
+  const db = await getDatabase();
+
+  const one = (sql: string, params: (string | number)[] = []): Record<string, any> => {
+    const stmt = db.prepare(sql);
+    if (params.length) stmt.bind(params);
+    const result: Record<string, any> = stmt.step() ? (stmt.getAsObject() as Record<string, any>) : {};
+    stmt.free();
+    return result;
+  };
+
+  const all = (sql: string, params: (string | number)[] = []): Record<string, any>[] => {
+    const stmt = db.prepare(sql);
+    if (params.length) stmt.bind(params);
+    const rows: Record<string, any>[] = [];
+    while (stmt.step()) rows.push(stmt.getAsObject() as Record<string, any>);
+    stmt.free();
+    return rows;
+  };
+
+  const totalRecords   = (one('SELECT COUNT(*) AS cnt FROM training_records')).cnt  ?? 0;
+  const labeledRecords = (one('SELECT COUNT(*) AS cnt FROM training_labels')).cnt   ?? 0;
+  const totalFeedback  = (one('SELECT COUNT(*) AS cnt FROM training_feedback')).cnt ?? 0;
+
+  const feedback_by_channel: { dashboard: number; gh: number; pr: number } = { dashboard: 0, gh: 0, pr: 0 };
+  for (const r of all('SELECT feedback_channel, COUNT(*) AS cnt FROM training_feedback GROUP BY feedback_channel')) {
+    (feedback_by_channel as any)[r.feedback_channel] = r.cnt;
+  }
+
+  const feedback_by_action: { accept: number; reject: number; modify: number } = { accept: 0, reject: 0, modify: 0 };
+  for (const r of all('SELECT action, COUNT(*) AS cnt FROM training_feedback GROUP BY action')) {
+    (feedback_by_action as any)[r.action] = r.cnt;
+  }
+
+  const label_distribution: { correct: number; false_positive: number; false_negative: number; partial: number } =
+    { correct: 0, false_positive: 0, false_negative: 0, partial: 0 };
+  for (const r of all(
+    'SELECT supervised_label, COUNT(*) AS cnt FROM training_labels WHERE supervised_label IS NOT NULL GROUP BY supervised_label',
+  )) {
+    (label_distribution as any)[r.supervised_label] = r.cnt;
+  }
+
+  const avgRow = one(
+    'SELECT AVG(precision_score) AS avg_p, AVG(recall_score) AS avg_r, AVG(rl_reward) AS avg_rl FROM training_labels',
+  );
+
+  return {
+    total_records:        totalRecords,
+    labeled_records:      labeledRecords,
+    total_feedback:       totalFeedback,
+    feedback_by_channel,
+    feedback_by_action,
+    label_distribution,
+    avg_precision:  avgRow.avg_p  ?? null,
+    avg_recall:     avgRow.avg_r  ?? null,
+    avg_rl_reward:  avgRow.avg_rl ?? null,
+  };
+}
+
+// ── Paginated record list (lightweight — no diff/prompt) ──────────────────────
+
+export interface TrainingRecordSummary {
+  id: number;
+  run_id: string;
+  created_at: string;
+  repository: string;
+  branch?: string;
+  pr_number?: number;
+  actor?: string;
+  model_version?: string;
+  analysis_type?: string;
+  gate_status: string;
+  status: string;
+  total_issues: number;
+  source: string;
+  feedback_count: number;
+  supervised_label?: string;
+  precision_score?: number;
+  recall_score?: number;
+  rl_reward?: number;
+  true_positives?: number;
+  false_positives?: number;
+  false_negatives?: number;
+}
+
+export async function listTrainingRecords(params: {
+  repository?: string;
+  labeled?: boolean;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<TrainingRecordSummary[]> {
+  const db = await getDatabase();
+  const conditions: string[] = [];
+  const sqlParams: (string | number)[] = [];
+
+  if (params.repository) { conditions.push('r.repository = ?');  sqlParams.push(params.repository); }
+  if (params.from)       { conditions.push('r.created_at >= ?'); sqlParams.push(params.from); }
+  if (params.to)         { conditions.push('r.created_at <= ?'); sqlParams.push(params.to); }
+  if (params.labeled)    { conditions.push('l.supervised_label IS NOT NULL'); }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limit  = params.limit  ?? 50;
+  const offset = params.offset ?? 0;
+  sqlParams.push(limit, offset);
+
+  const stmt = db.prepare(`
+    SELECT
+      r.id, r.run_id, r.created_at, r.repository, r.branch, r.pr_number,
+      r.actor, r.model_version, r.analysis_type,
+      r.gate_status, r.status, r.total_issues, r.source,
+      (SELECT COUNT(*) FROM training_feedback f WHERE f.record_id = r.id) AS feedback_count,
+      l.supervised_label, l.precision_score, l.recall_score, l.rl_reward,
+      l.true_positives, l.false_positives, l.false_negatives
+    FROM training_records r
+    LEFT JOIN training_labels l ON l.record_id = r.id
+    ${where}
+    ORDER BY r.created_at DESC
+    LIMIT ? OFFSET ?
+  `);
+  stmt.bind(sqlParams);
+
+  const rows: TrainingRecordSummary[] = [];
+  while (stmt.step()) {
+    rows.push(stmt.getAsObject() as unknown as TrainingRecordSummary);
+  }
+  stmt.free();
+  return rows;
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function safeParseJSON<T>(raw: any, fallback: T): T {

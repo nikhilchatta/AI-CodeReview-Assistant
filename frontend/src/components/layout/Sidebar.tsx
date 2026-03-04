@@ -6,6 +6,7 @@ import AccountTreeIcon from '@mui/icons-material/AccountTree';
 import BuildIcon from '@mui/icons-material/Build';
 import IntegrationInstructionsIcon from '@mui/icons-material/IntegrationInstructions';
 import InsightsIcon from '@mui/icons-material/Insights';
+import SchoolIcon from '@mui/icons-material/School';
 
 interface Props {
   activeTab: number;
@@ -53,12 +54,20 @@ const menuItems = [
   },
 ];
 
-const observabilityItem = {
-  id: 8,
-  label: 'Agent Observability',
-  icon: <InsightsIcon />,
-  color: '#F59E0B',
-};
+const observabilityItems = [
+  {
+    id: 8,
+    label: 'Agent Observability',
+    icon: <InsightsIcon />,
+    color: '#F59E0B',
+  },
+  {
+    id: 9,
+    label: 'Training Data',
+    icon: <SchoolIcon />,
+    color: '#8B5CF6',
+  },
+];
 
 export default function Sidebar({ activeTab, onTabChange }: Props) {
   return (
@@ -300,49 +309,49 @@ export default function Sidebar({ activeTab, onTabChange }: Props) {
       </Box>
       <Divider sx={{ mx: 2, mb: 1 }} />
       <List sx={{ px: 2 }}>
-        <ListItem disablePadding sx={{ mb: 0.5 }}>
-          <ListItemButton
-            selected={activeTab === observabilityItem.id}
-            onClick={() => onTabChange(observabilityItem.id)}
-            sx={{
-              borderRadius: 1.5,
-              transition: 'all 0.2s',
-              '&.Mui-selected': {
-                bgcolor: (theme) =>
-                  theme.palette.mode === 'dark'
-                    ? 'rgba(245, 158, 11, 0.15)'
-                    : 'rgba(245, 158, 11, 0.08)',
-                color: observabilityItem.color,
-                '& .MuiListItemIcon-root': {
-                  color: observabilityItem.color,
+        {observabilityItems.map((item) => (
+          <ListItem key={item.id} disablePadding sx={{ mb: 0.5 }}>
+            <ListItemButton
+              selected={activeTab === item.id}
+              onClick={() => onTabChange(item.id)}
+              sx={{
+                borderRadius: 1.5,
+                transition: 'all 0.2s',
+                '&.Mui-selected': {
+                  bgcolor: (theme) =>
+                    theme.palette.mode === 'dark'
+                      ? `${item.color}26`
+                      : `${item.color}14`,
+                  color: item.color,
+                  '& .MuiListItemIcon-root': { color: item.color },
+                  '&:hover': {
+                    bgcolor: (theme) =>
+                      theme.palette.mode === 'dark'
+                        ? `${item.color}33`
+                        : `${item.color}1F`,
+                  },
                 },
                 '&:hover': {
                   bgcolor: (theme) =>
                     theme.palette.mode === 'dark'
-                      ? 'rgba(245, 158, 11, 0.2)'
-                      : 'rgba(245, 158, 11, 0.12)',
+                      ? 'rgba(255, 255, 255, 0.05)'
+                      : 'rgba(0, 0, 0, 0.04)',
                 },
-              },
-              '&:hover': {
-                bgcolor: (theme) =>
-                  theme.palette.mode === 'dark'
-                    ? 'rgba(255, 255, 255, 0.05)'
-                    : 'rgba(0, 0, 0, 0.04)',
-              },
-            }}
-          >
-            <ListItemIcon sx={{ minWidth: 40, color: 'text.secondary' }}>
-              {observabilityItem.icon}
-            </ListItemIcon>
-            <ListItemText
-              primary={observabilityItem.label}
-              primaryTypographyProps={{
-                fontSize: '0.875rem',
-                fontWeight: activeTab === observabilityItem.id ? 600 : 500,
               }}
-            />
-          </ListItemButton>
-        </ListItem>
+            >
+              <ListItemIcon sx={{ minWidth: 40, color: 'text.secondary' }}>
+                {item.icon}
+              </ListItemIcon>
+              <ListItemText
+                primary={item.label}
+                primaryTypographyProps={{
+                  fontSize: '0.875rem',
+                  fontWeight: activeTab === item.id ? 600 : 500,
+                }}
+              />
+            </ListItemButton>
+          </ListItem>
+        ))}
       </List>
     </Box>
   );

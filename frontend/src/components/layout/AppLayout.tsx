@@ -11,6 +11,7 @@ import ExistingWorkflowIntegrationPage from '../../pages/ExistingWorkflowIntegra
 import EnterpriseCredentialsPage from '../../pages/EnterpriseCredentialsPage';
 import DynamicRulesPage from '../../pages/DynamicRulesPage';
 import ObservabilityPage from '../../pages/ObservabilityPage';
+import TrainingPage from '../../pages/TrainingPage';
 
 interface Props {
   darkMode: boolean;
@@ -49,6 +50,7 @@ export default function AppLayout({ darkMode, onToggleDarkMode }: Props) {
           {activeTab === 6 && <EnterpriseCredentialsPage />}
           {activeTab === 7 && <DynamicRulesPage />}
           {activeTab === 8 && <ObservabilityPage />}
+          {activeTab === 9 && <TrainingPage />}
         </Box>
       </Box>
     </Box>

@@ -22,6 +22,8 @@ import {
   computeAndStoreLabels,
   exportTrainingRecords,
   ensureTrainingSchema,
+  getTrainingStats,
+  listTrainingRecords,
   type TrainingExportFilters,
 } from '../db/training.js';
 
@@ -160,6 +162,47 @@ export function createTrainingRouter(): Router {
     } catch (error: any) {
       console.error('[TRAINING] Export failed:', error.message);
       return res.status(500).json({ error: 'Export failed', details: error.message });
+    }
+  });
+
+  // ── GET /api/training/stats ────────────────────────────────────────────────
+  //
+  // Returns aggregate counts and averages for the training dashboard.
+  router.get('/training/stats', async (_req: Request, res: Response) => {
+    try {
+      const stats = await getTrainingStats();
+      return res.json(stats);
+    } catch (error: any) {
+      console.error('[TRAINING] Stats failed:', error.message);
+      return res.status(500).json({ error: 'Failed to fetch training stats', details: error.message });
+    }
+  });
+
+  // ── GET /api/training/records ──────────────────────────────────────────────
+  //
+  // Paginated list of training records with label info (no diff/prompt fields).
+  //
+  // Query params:
+  //   repository  string    filter by repo
+  //   labeled     'true'    only records with a supervised_label
+  //   from        ISO date  created_at >=
+  //   to          ISO date  created_at <=
+  //   limit       number    default: 50
+  //   offset      number    default: 0
+  router.get('/training/records', async (req: Request, res: Response) => {
+    try {
+      const records = await listTrainingRecords({
+        repository: req.query.repository as string | undefined,
+        labeled:    req.query.labeled === 'true',
+        from:       req.query.from    as string | undefined,
+        to:         req.query.to      as string | undefined,
+        limit:      req.query.limit  ? parseInt(req.query.limit  as string, 10) : 50,
+        offset:     req.query.offset ? parseInt(req.query.offset as string, 10) : 0,
+      });
+      return res.json({ count: records.length, data: records });
+    } catch (error: any) {
+      console.error('[TRAINING] Records list failed:', error.message);
+      return res.status(500).json({ error: 'Failed to list training records', details: error.message });
     }
   });
 

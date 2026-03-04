@@ -113,6 +113,72 @@ export async function submitFeedback(payload: FeedbackPayload) {
   return response.json();
 }
 
+// ── Training Stats + Records API ──
+
+export interface TrainingStats {
+  total_records: number;
+  labeled_records: number;
+  total_feedback: number;
+  feedback_by_channel: { dashboard: number; gh: number; pr: number };
+  feedback_by_action: { accept: number; reject: number; modify: number };
+  label_distribution: {
+    correct: number;
+    false_positive: number;
+    false_negative: number;
+    partial: number;
+  };
+  avg_precision: number | null;
+  avg_recall: number | null;
+  avg_rl_reward: number | null;
+}
+
+export async function fetchTrainingStats(): Promise<TrainingStats> {
+  const response = await fetch(`${API_BASE}/training/stats`);
+  if (!response.ok) throw new Error(`Failed to fetch training stats: ${response.status}`);
+  return response.json();
+}
+
+export interface TrainingRecordSummary {
+  id: number;
+  run_id: string;
+  created_at: string;
+  repository: string;
+  branch?: string;
+  pr_number?: number;
+  actor?: string;
+  model_version?: string;
+  analysis_type?: string;
+  gate_status: string;
+  status: string;
+  total_issues: number;
+  source: string;
+  feedback_count: number;
+  supervised_label?: string;
+  precision_score?: number;
+  recall_score?: number;
+  rl_reward?: number;
+  true_positives?: number;
+  false_positives?: number;
+  false_negatives?: number;
+}
+
+export async function fetchTrainingRecords(params: {
+  repository?: string;
+  labeled?: boolean;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<{ count: number; data: TrainingRecordSummary[] }> {
+  const qs = buildQueryString({
+    ...params,
+    labeled: params.labeled ? 'true' : undefined,
+  } as Record<string, string | number | undefined>);
+  const response = await fetch(`${API_BASE}/training/records${qs}`);
+  if (!response.ok) throw new Error(`Failed to fetch training records: ${response.status}`);
+  return response.json();
+}
+
 export interface TrainingExportParams {
   format?: 'jsonl' | 'json';
   labeled?: boolean;
